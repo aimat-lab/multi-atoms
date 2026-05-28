@@ -2,6 +2,7 @@
 name = "multiatoms"
 version = "0.1.0"
 description = "Parallel, GPU-batched molecular dynamics on top of ASE Atoms"
+readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "Paul Link", email = "cq3730@partner.kit.edu" }]
 dependencies = [

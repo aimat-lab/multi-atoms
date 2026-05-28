@@ -1,0 +1,24 @@
+[workspace]
+authors = ["Paul Link <cq3730@partner.kit.edu>"]
+channels = ["pytorch", "conda-forge"]
+name = "multiatoms"
+platforms = ["linux-64"]
+version = "0.1.0"
+
+[tasks]
+test = "pytest"
+lint = "ruff check ."
+format = "ruff format ."
+
+[pypi-dependencies]
+multiatoms = { path = ".", editable = true }
+
+[dependencies]
+python = ">=3.10"
+numpy = "*"
+ase = ">=3.22"
+greenlet = ">=3"
+pytorch = { version = ">=2.0", channel = "pytorch" }
+cpuonly = { version = "*", channel = "pytorch" }
+pytest = "*"
+ruff = "*"
