@@ -20,6 +20,24 @@ numpy = "*"
 ase = ">=3.22"
 greenlet = ">=3"
 pytorch = { version = ">=2.0", channel = "pytorch" }
-cpuonly = { version = "*", channel = "pytorch" }
 pytest = "*"
 ruff = "*"
+
+# CPU PyTorch (laptop / default). `cpuonly` forces the CPU build.
+[feature.cpu.dependencies]
+cpuonly = { version = "*", channel = "pytorch" }
+
+# GPU PyTorch (cluster). Match the CUDA version to your node's driver
+# (`nvidia-smi` -> "CUDA Version"); 12.1 works with any >=12.1 driver.
+[feature.gpu]
+channels = ["nvidia", "pytorch", "conda-forge"]
+
+[feature.gpu.system-requirements]
+cuda = "12"
+
+[feature.gpu.dependencies]
+pytorch-cuda = { version = "12.1.*", channel = "pytorch" }
+
+[environments]
+default = { features = ["cpu"] }
+gpu = { features = ["gpu"] }
