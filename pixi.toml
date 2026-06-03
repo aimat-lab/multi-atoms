@@ -9,6 +9,7 @@ version = "0.1.0"
 test = "pytest"
 lint = "ruff check ."
 format = "ruff format ."
+bench = "python benchmarks/measure_duty_cycle.py"
 
 [pypi-dependencies]
 multiatoms = { path = ".", editable = true }
