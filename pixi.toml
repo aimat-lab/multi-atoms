@@ -27,17 +27,32 @@ ruff = "*"
 [feature.cpu.dependencies]
 cpuonly = { version = "*", channel = "pytorch" }
 
-# GPU PyTorch (cluster). Match the CUDA version to your node's driver
-# (`nvidia-smi` -> "CUDA Version"); 12.1 works with any >=12.1 driver.
-[feature.gpu]
+# Benchmark / GPU env: mirrors the real ML potential (torch_geometric SchNet) so
+# the duty-cycle benchmark sees a representative GPU kernel mix (radius graph +
+# message passing + autograd forces), not a dense MLP stand-in. This is the only
+# GPU environment -- the synthetic model runs here too (it never imports
+# torch_geometric, so the install just sits unused).
+#
+# SchNet's radius_graph needs `torch_cluster`, installed from a wheel that is
+# pinned to an exact torch + CUDA + python build. We reuse the ML repo's proven
+# wheel (torch 2.5 / cu118 / cp311), so this whole feature must pin to match it.
+# cu118 binaries run fine on CUDA 12 drivers (backward compatible).
+[feature.bench]
 channels = ["nvidia", "pytorch", "conda-forge"]
 
-[feature.gpu.system-requirements]
-cuda = "12"
+[feature.bench.system-requirements]
+cuda = "11.8"
 
-[feature.gpu.dependencies]
-pytorch-cuda = { version = "12.1.*", channel = "pytorch" }
+[feature.bench.dependencies]
+python = ">=3.11,<3.12"
+pytorch = { version = ">=2.5.1,<2.6", channel = "pytorch" }
+pytorch-cuda = { version = "11.8.*", channel = "pytorch" }
+cudatoolkit = { version = "11.8.*", channel = "conda-forge" }
+torch-geometric = "*"
+
+[feature.bench.pypi-dependencies]
+torch_cluster = { url = "https://data.pyg.org/whl/torch-2.5.0%2Bcu118/torch_cluster-1.6.3%2Bpt25cu118-cp311-cp311-linux_x86_64.whl" }
 
 [environments]
 default = { features = ["cpu"] }
-gpu = { features = ["gpu"] }
+bench = { features = ["bench"] }

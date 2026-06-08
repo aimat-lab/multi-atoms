@@ -27,10 +27,17 @@ For each: max throughput speedup ~= 1 / duty_cycle, and it takes about
 Run on a machine with a GPU (a CPU run only validates the harness; the ratio is
 not representative):
 
-    # Synthetic model. Tune --hidden / --n-layers until the reported GPU
-    # forward time roughly matches your real model, and --n-atoms to match your
-    # system size:
+    # Synthetic model (dep-free default). Tune --hidden / --n-layers until the
+    # reported GPU forward time roughly matches your real model, and --n-atoms to
+    # match your system size:
     pixi run python benchmarks/measure_duty_cycle.py --n-systems 256 --n-steps 200
+
+    # The real SchNet backbone (mirrors the ML repo's SchNet/ISSNet, minus the
+    # Amber prior). The model knobs default to the ISSNet config, so just pick a
+    # batch width (--n-systems) and per-system size (--n-atoms). Needs the `bench`
+    # env, which pins torch 2.5 / cu118 / cp311 to match the torch_cluster wheel:
+    pixi run -e bench python benchmarks/measure_duty_cycle.py \
+        --model schnet --n-systems 256 --n-atoms 60 --n-steps 200
 
     # Or point it at your real model + structure. --manager-factory names a
     # "module.path:function" that takes a device string and returns a
@@ -167,10 +174,95 @@ class SyntheticManager(ModelManager):
 
 
 # --------------------------------------------------------------------------- #
+# Real ML potential mirror: torch_geometric SchNet
+# --------------------------------------------------------------------------- #
+class BenchSchNet(nn.Module):
+    """The actual SchNet backbone used by the ML repo, standalone for benching.
+
+    ``SchNetImplicitSolvent`` / ``ISSNet`` in the ML repo are both
+    ``torch_geometric.nn.models.SchNet`` (a variant, for ISSNet) plus an autograd
+    ``get_forces``. We reproduce exactly that here -- minus the Amber vacuum prior,
+    which is CPU/OpenMM work and a confound for a *GPU* duty-cycle measurement.
+
+    The forward signature ``(z, pos, batch)`` matches the keys ``curate_batch``
+    emits, so the base ``ModelManager.model_forward`` (``model(**input)`` +
+    ``get_forces``) drives it unchanged -- the same path the real model takes.
+    """
+
+    def __init__(
+        self,
+        hidden: int = 128,
+        n_interactions: int = 6,
+        n_gaussians: int = 50,
+        cutoff: float = 10.0,
+    ):
+        super().__init__()
+        # Lazy import so the synthetic model (the dep-free default) never needs
+        # torch_geometric / torch_cluster installed.
+        from torch_geometric.nn.models import SchNet
+
+        self.schnet = SchNet(
+            hidden_channels=hidden,
+            num_interactions=n_interactions,
+            num_gaussians=n_gaussians,
+            cutoff=cutoff,
+        )
+
+    def forward(self, z: Tensor, pos: Tensor, batch: Tensor, **_: Tensor) -> Tensor:
+        return self.schnet(z, pos, batch).squeeze(-1)
+
+    def get_forces(self, energy: Tensor, pos: Tensor) -> Tensor:
+        (grad,) = torch.autograd.grad(energy.sum(), pos, create_graph=False)
+        return -grad
+
+    def cleanup(self) -> None:
+        pass
+
+
+class SchNetManager(ModelManager):
+    """ModelManager for BenchSchNet: emits the (z, pos, batch) SchNet expects.
+
+    Mirrors the ML repo's ``VacuumBatchProcessor`` curation, minus its unit
+    conversions (irrelevant to timing). Features are identical across systems,
+    so z is read once and tiled.
+    """
+
+    def curate_batch(self, atoms_list: List) -> dict[str, Tensor]:
+        n_systems = len(atoms_list)
+        n_atoms = len(atoms_list[0])
+        positions = np.stack([a.positions for a in atoms_list]).reshape(-1, 3)
+        pos = torch.tensor(positions, dtype=torch.float32, device=self.device)
+        z_one = torch.tensor(
+            atoms_list[0].get_atomic_numbers(), dtype=torch.long, device=self.device
+        )
+        z = z_one.repeat(n_systems)
+        batch_idx = torch.arange(
+            n_systems, device=self.device
+        ).repeat_interleave(n_atoms)
+        return {"z": z, "pos": pos, "batch": batch_idx}
+
+
+# --------------------------------------------------------------------------- #
 # Setup helpers
 # --------------------------------------------------------------------------- #
-def build_synthetic(args, device: str) -> tuple[_MM, Path, tempfile.TemporaryDirectory]:
-    """Synthetic manager + a temp PDB of ``--n-atoms`` carbon atoms in a box."""
+# Model-specific defaults for knobs left unset on the CLI. schnet mirrors the
+# ML repo's ISSNet config; synthetic keeps a larger MLP so it stays GPU-bound.
+_MODEL_DEFAULTS = {
+    "schnet": {"hidden": 32, "n_layers": 3, "n_gaussians": 32},
+    "synthetic": {"hidden": 512, "n_layers": 4, "n_gaussians": 50},
+}
+
+
+def _apply_model_defaults(args) -> None:
+    """Fill in None knobs with the chosen model's defaults (CLI value wins)."""
+    defaults = _MODEL_DEFAULTS[args.model]
+    for knob, value in defaults.items():
+        if getattr(args, knob) is None:
+            setattr(args, knob, value)
+
+
+def _template_pdb(args) -> tuple[Path, tempfile.TemporaryDirectory]:
+    """A temp PDB of ``--n-atoms`` carbon atoms randomly placed in a cubic box."""
     rng = np.random.default_rng(0)
     box = max(5.0, args.n_atoms ** (1 / 3) * 2.0)
     positions = rng.uniform(0.0, box, size=(args.n_atoms, 3))
@@ -178,12 +270,35 @@ def build_synthetic(args, device: str) -> tuple[_MM, Path, tempfile.TemporaryDir
     template.set_cell([box, box, box])
 
     tmpdir = tempfile.TemporaryDirectory(prefix="duty_cycle_")
-    pdb_path = Path(tmpdir.name) / "synthetic.pdb"
+    pdb_path = Path(tmpdir.name) / "template.pdb"
     ase_write(pdb_path, template, format="proteindatabank")
+    return pdb_path, tmpdir
 
+
+def build_synthetic(args, device: str) -> tuple[_MM, Path, tempfile.TemporaryDirectory]:
+    """Synthetic per-atom MLP manager + a temp PDB."""
+    pdb_path, tmpdir = _template_pdb(args)
     model = SyntheticPotential(hidden=args.hidden, n_layers=args.n_layers)
     model = model.to(device).eval()
     manager = SyntheticManager(model=model, device=device)
+    return manager, pdb_path, tmpdir
+
+
+def build_schnet(args, device: str) -> tuple[_MM, Path, tempfile.TemporaryDirectory]:
+    """The real SchNet backbone (torch_geometric) + a temp PDB.
+
+    To mirror the ISSNet config, pass ``--hidden 32 --n-layers 3 --n-gaussians 32``;
+    ``--hidden``/``--n-layers`` map to SchNet's ``hidden_channels``/``num_interactions``.
+    """
+    pdb_path, tmpdir = _template_pdb(args)
+    model = BenchSchNet(
+        hidden=args.hidden,
+        n_interactions=args.n_layers,
+        n_gaussians=args.n_gaussians,
+        cutoff=args.cutoff,
+    )
+    model = model.to(device).eval()
+    manager = SchNetManager(model=model, device=device)
     return manager, pdb_path, tmpdir
 
 
@@ -217,14 +332,29 @@ def main() -> None:
     parser.add_argument("--warmup-steps", type=int, default=20)
     parser.add_argument("--temperature-k", type=float, default=300.0)
     parser.add_argument("--device", default=None, help="cuda / cpu (auto by default)")
-    # synthetic-model knobs (ignored when --manager-factory is given)
-    parser.add_argument("--n-atoms", type=int, default=60)
-    parser.add_argument("--hidden", type=int, default=512)
-    parser.add_argument("--n-layers", type=int, default=4)
+    # built-in model: "synthetic" (dep-free dense MLP) or "schnet" (the real
+    # torch_geometric backbone; needs the `bench` env / `bench` extra).
+    parser.add_argument("--model", choices=["synthetic", "schnet"], default="synthetic")
+    # System size: atoms PER system (one molecule). Batch = n_systems * n_atoms.
+    parser.add_argument("--n-atoms", type=int, default=60, help="atoms per system")
+    # Model knobs (ignored when --manager-factory is given). Defaults are
+    # model-specific and filled in below: schnet uses the ISSNet config
+    # (hidden=32, n_layers=3, n_gaussians=32); synthetic uses a larger MLP.
+    parser.add_argument("--hidden", type=int, default=None,
+                        help="hidden width (schnet:32, synthetic:512)")
+    parser.add_argument("--n-layers", type=int, default=None,
+                        help="schnet num_interactions / synthetic MLP depth "
+                             "(schnet:3, synthetic:4)")
+    # schnet-only knobs (--hidden/--n-layers map to hidden_channels/num_interactions)
+    parser.add_argument("--n-gaussians", type=int, default=None,
+                        help="schnet num_gaussians (default 32)")
+    parser.add_argument("--cutoff", type=float, default=10.0,
+                        help="schnet radius graph cutoff in Angstrom")
     # real-model hook
     parser.add_argument("--manager-factory", default=None, help="module.path:function")
     parser.add_argument("--pdb", default=None, help="structure for the real model")
     args = parser.parse_args()
+    _apply_model_defaults(args)
 
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     if not device.startswith("cuda"):
@@ -240,6 +370,12 @@ def main() -> None:
         manager = build_real(args, device)
         pdb_path = Path(args.pdb)
         mode = f"real ({args.manager_factory})"
+    elif args.model == "schnet":
+        manager, pdb_path, tmpdir = build_schnet(args, device)
+        mode = (
+            f"schnet (hidden={args.hidden}, n_interactions={args.n_layers}, "
+            f"n_gaussians={args.n_gaussians}, cutoff={args.cutoff})"
+        )
     else:
         manager, pdb_path, tmpdir = build_synthetic(args, device)
         mode = f"synthetic (hidden={args.hidden}, n_layers={args.n_layers})"

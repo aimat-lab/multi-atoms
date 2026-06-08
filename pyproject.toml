@@ -14,6 +14,10 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest"]
+# Note: the benchmark's deps (torch-geometric + torch_cluster) intentionally live
+# only in pixi.toml's [feature.bench]. The benchmark is a dev tool under
+# benchmarks/, which is outside `src/` and so never shipped in the wheel -- a
+# pyproject extra here would advertise a dependency for code nobody can import.
 
 [build-system]
 requires = ["setuptools>=61.0"]
