@@ -29,7 +29,7 @@ It runs two phases and prints the speedup:
 IMPORTANT: the workers are CPU-bound, so the overlap only materializes if the
 node actually has >= K CPU cores free. On SLURM request --cpus-per-task >= K+1.
 
-    pixi run -e gpu python benchmarks/force_server_poc.py \
+    pixi run -e bench python benchmarks/force_server_poc.py \
         --model schnet --n-systems 256 --n-atoms 60 --n-steps 200 --workers 2
 """
 

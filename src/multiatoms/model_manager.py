@@ -105,25 +105,33 @@ class ModelManager(ABC):
         if not atoms_to_compute:
             return
 
-        # 2. User-defined batch curation
-        batched_input = self.curate_batch(atoms_to_compute)
+        # 2. Run the model (curation + forward + post-process)
+        forces, energy = self._infer(atoms_to_compute)
 
-        # 3. Model forward
-        energy_raw, forces_raw = self.model_forward(batched_input)
-
-        # 4. Convert to numpy
-        energy = energy_raw.flatten().cpu().detach().numpy()
-        forces = forces_raw.cpu().detach().numpy()
-
-        # 5. User-defined post-processing hook
-        forces, energy = self.post_process_hook(forces, energy)
-
-        # 6. Standard result distribution
+        # 3. Standard result distribution
         self.distribute_results(atoms_to_compute, forces, energy)
 
-        # 7. Update per-atom position cache for computed atoms
+        # 4. Update per-atom position cache for computed atoms
         for atom in atoms_to_compute:
             atom._cached_positions = atom.positions.copy()
+
+    def _infer(
+        self, atoms_to_compute: List["BatchedAtoms"]
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Run the model on the systems that need new forces -> ``(forces, energy)``.
+
+        Curation + forward + to-numpy + post-process, with no caching or result
+        distribution. Factored out so it can be shared by the local path
+        (``compute_energy_and_forces``) and the multi-process GPU force server
+        (``multiatoms.poly_atoms``): the server runs this on the systems a worker
+        shipped over and sends the arrays back, while ``RemoteModelManager``
+        overrides it to do the shipping.
+        """
+        batched_input = self.curate_batch(atoms_to_compute)
+        energy_raw, forces_raw = self.model_forward(batched_input)
+        energy = energy_raw.flatten().cpu().detach().numpy()
+        forces = forces_raw.cpu().detach().numpy()
+        return self.post_process_hook(forces, energy)
 
     @abstractmethod
     def curate_batch(self, atoms_list: List["BatchedAtoms"]) -> dict[str, Tensor]:
