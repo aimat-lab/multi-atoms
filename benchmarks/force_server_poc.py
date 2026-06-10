@@ -105,19 +105,6 @@ def build_manager(spec: ModelSpec, device: str) -> ModelManager:
     return manager_cls(model=model.to(device).eval(), device=device)
 
 
-def run_inference(manager: ModelManager, views: list) -> tuple[np.ndarray, np.ndarray]:
-    """Mirror of ModelManager.compute_energy_and_forces steps 2-5 (no distribute).
-
-    Kept here rather than refactored into the package so the POC stays
-    non-invasive; the real integration would expose this as ModelManager._infer.
-    """
-    batched = manager.curate_batch(views)
-    energy_raw, forces_raw = manager.model_forward(batched)
-    energy = energy_raw.flatten().detach().cpu().numpy()
-    forces = forces_raw.detach().cpu().numpy()
-    return manager.post_process_hook(forces, energy)
-
-
 class _AtomsView:
     """Minimal stand-in for the atoms attributes curate_batch reads.
 
@@ -222,21 +209,75 @@ def run_md(multi: MultiAtoms, integrators, n_steps: int) -> None:
 # --------------------------------------------------------------------------- #
 # Process entry points (top-level so 'spawn' can import them)
 # --------------------------------------------------------------------------- #
-def server_main(req_q, res_qs, spec: ModelSpec, z: np.ndarray, ready_evt) -> None:
+_STAGES = ("get", "rebuild", "curate_h2d", "forward", "d2h_post", "put")
+
+
+def server_main(
+    req_q, res_qs, spec: ModelSpec, z: np.ndarray, ready_evt, start_evt, profile_q
+) -> None:
+    """GPU server, instrumented to expose the Tier-1 headroom.
+
+    Times each per-request stage (queue/unpickle, rebuild, curate+H2D, forward,
+    D2H+post, pickle/put). Accumulators reset when ``start_evt`` fires, so warmup
+    requests are excluded and the breakdown reflects steady state. The profile
+    (stage sums + forward count) is sent back on ``profile_q`` at shutdown.
+    """
     manager = build_manager(spec, _device())
     z = np.asarray(z)
+    acc = dict.fromkeys(_STAGES, 0.0)
+    n_fwd = 0
+    timed = False
     ready_evt.set()
+
     while True:
+        t = time.perf_counter()
         item = req_q.get()
-        if item is None:  # poison pill -> shut down
+        get_dt = time.perf_counter() - t
+        if item is None:  # poison pill -> send profile and shut down
             break
+        if not timed and start_evt.is_set():  # drop warmup; measure steady state
+            acc = dict.fromkeys(_STAGES, 0.0)
+            n_fwd = 0
+            timed = True
+
         worker_id, positions = item
         try:
+            t = time.perf_counter()
             views = [_AtomsView(positions[i], z) for i in range(positions.shape[0])]
-            forces, energy = run_inference(manager, views)
+            rebuild_dt = time.perf_counter() - t
+
+            t = time.perf_counter()
+            batched = manager.curate_batch(views)
+            _sync()
+            curate_dt = time.perf_counter() - t
+
+            t = time.perf_counter()
+            energy_raw, forces_raw = manager.model_forward(batched)
+            _sync()
+            forward_dt = time.perf_counter() - t
+
+            t = time.perf_counter()
+            energy = energy_raw.flatten().detach().cpu().numpy()
+            forces = forces_raw.detach().cpu().numpy()
+            forces, energy = manager.post_process_hook(forces, energy)
+            d2h_dt = time.perf_counter() - t
+
+            t = time.perf_counter()
             res_qs[worker_id].put((forces, energy))
+            put_dt = time.perf_counter() - t
         except Exception as exc:  # forward the error so the worker doesn't hang
             res_qs[worker_id].put(_ServerError(repr(exc)))
+            continue
+
+        acc["get"] += get_dt
+        acc["rebuild"] += rebuild_dt
+        acc["curate_h2d"] += curate_dt
+        acc["forward"] += forward_dt
+        acc["d2h_post"] += d2h_dt
+        acc["put"] += put_dt
+        n_fwd += 1
+
+    profile_q.put((acc, n_fwd))
     manager.cleanup()
 
 
@@ -259,18 +300,25 @@ def worker_main(
     done_q, start_evt,
 ) -> None:
     torch.set_num_threads(1)  # CPU-bound integrator; avoid thread oversubscription
-    manager = RemoteModelManager(req_q, res_q, worker_id)
-    multi, integrators = setup_simulation(manager, pdb_path, n_systems, temp)
-    if warmup:
-        run_md(multi, integrators, warmup)  # also warms the server (real requests)
-    ready_q.put(worker_id)
+    readied = False
+    try:
+        manager = RemoteModelManager(req_q, res_q, worker_id)
+        multi, integrators = setup_simulation(manager, pdb_path, n_systems, temp)
+        if warmup:
+            run_md(multi, integrators, warmup)  # also warms the server
+        ready_q.put(worker_id)
+        readied = True
 
-    start_evt.wait()
-    t_start = time.time()
-    run_md(multi, integrators, n_steps)
-    t_end = time.time()
-    multi.clean_up()
-    done_q.put((worker_id, t_start, t_end, n_systems * n_steps))
+        start_evt.wait()
+        t_start = time.time()
+        run_md(multi, integrators, n_steps)
+        t_end = time.time()
+        multi.clean_up()
+        done_q.put((worker_id, t_start, t_end, n_systems * n_steps))
+    except Exception:  # e.g. server OOM propagated as RuntimeError -- unblock main
+        if not readied:
+            ready_q.put(worker_id)
+        done_q.put((worker_id, 0.0, 0.0, -1))  # steps=-1 marks failure
 
 
 # --------------------------------------------------------------------------- #
@@ -289,17 +337,26 @@ def run_baseline(ctx, spec, pdb_path, args) -> float:
     return elapsed
 
 
-def run_force_server(ctx, spec, pdb_path, z, args) -> tuple[float, list]:
+def run_force_server(
+    ctx, spec, pdb_path, z, args, n_systems
+) -> tuple[float, list, tuple]:
+    """Run K workers x n_systems against the instrumented server.
+
+    Returns (wall, results, profile). ``wall`` is the concurrent production span,
+    or -1.0 if any worker failed (e.g. CUDA OOM at large n_systems).
+    """
     k = args.workers
     req_q = ctx.Queue()
     res_qs = [ctx.Queue() for _ in range(k)]
     ready_q = ctx.Queue()
     done_q = ctx.Queue()
+    profile_q = ctx.Queue()
     start_evt = ctx.Event()
     server_ready = ctx.Event()
 
     server = ctx.Process(
-        target=server_main, args=(req_q, res_qs, spec, z, server_ready)
+        target=server_main,
+        args=(req_q, res_qs, spec, z, server_ready, start_evt, profile_q),
     )
     server.start()
     server_ready.wait()
@@ -307,7 +364,7 @@ def run_force_server(ctx, spec, pdb_path, z, args) -> tuple[float, list]:
     workers = [
         ctx.Process(
             target=worker_main,
-            args=(i, req_q, res_qs[i], pdb_path, args.n_systems, args.n_steps,
+            args=(i, req_q, res_qs[i], pdb_path, n_systems, args.n_steps,
                   args.warmup_steps, args.temperature_k, ready_q, done_q, start_evt),
         )
         for i in range(k)
@@ -315,22 +372,24 @@ def run_force_server(ctx, spec, pdb_path, z, args) -> tuple[float, list]:
     for w in workers:
         w.start()
 
-    for _ in range(k):  # wait until every worker has finished warmup
+    for _ in range(k):  # wait until every worker has finished warmup (or failed)
         ready_q.get()
 
     start_evt.set()  # release the timed run
     results = [done_q.get() for _ in range(k)]
 
-    req_q.put(None)  # poison pill -> server shuts down
+    req_q.put(None)  # poison pill -> server sends profile and shuts down
+    profile = profile_q.get()
     server.join()
     for w in workers:
         w.join()
 
-    # True concurrent wall span across all workers.
+    if any(r[3] == -1 for r in results):  # a worker failed (e.g. OOM)
+        return -1.0, results, profile
+
     t_start = min(r[1] for r in results)
     t_end = max(r[2] for r in results)
-    wall = t_end - t_start
-    return wall, results
+    return t_end - t_start, results, profile
 
 
 def main() -> None:
@@ -348,6 +407,11 @@ def main() -> None:
     parser.add_argument("--n-layers", type=int, default=None)
     parser.add_argument("--n-gaussians", type=int, default=None)
     parser.add_argument("--cutoff", type=float, default=10.0)
+    parser.add_argument(
+        "--sweep", default=None,
+        help="Comma-separated n-systems values; run the server headroom probe for "
+        "each and print a summary table (skips the single-process baseline).",
+    )
     args = parser.parse_args()
 
     if not torch.cuda.is_available():
@@ -370,25 +434,72 @@ def main() -> None:
 
     ctx = mp.get_context("spawn")
 
+    if args.sweep:
+        sizes = [int(x) for x in args.sweep.split(",")]
+        run_sweep(ctx, spec, str(pdb_path), z, args, sizes)
+        tmpdir.cleanup()
+        return
+
     print(f"Phase A: baseline (single process), {args.n_systems} systems ...")
     base_elapsed = run_baseline(ctx, spec, str(pdb_path), args)
 
     print(f"Phase B: force server, K={args.workers} workers x "
           f"{args.n_systems} systems ...")
-    fs_wall, results = run_force_server(ctx, spec, str(pdb_path), z, args)
+    fs_wall, results, profile = run_force_server(
+        ctx, spec, str(pdb_path), z, args, args.n_systems
+    )
 
     tmpdir.cleanup()
-    report(args, base_elapsed, fs_wall, results)
+    report(args, base_elapsed, fs_wall, results, profile)
 
 
-def report(args, base_elapsed, fs_wall, results) -> None:
+def summarize(profile) -> dict | None:
+    """Reduce the server stage accumulators to fractions + the Tier-1 ceiling.
+
+    Partitions the per-request cycle into forward / ipc (get+put, the pickle) /
+    rest (rebuild+H2D+D2H). ``ceiling`` = 1/forward = the max Tier-1 speedup if
+    every non-forward stage could be fully overlapped with compute.
+    """
+    acc, n_fwd = profile
+    total = sum(acc.values())
+    if not n_fwd or total <= 0:
+        return None
+    fwd = acc["forward"]
+    ipc = acc["get"] + acc["put"]
+    return {
+        "ms_req": total / n_fwd * 1e3,
+        "fwd": fwd / total,
+        "ipc": ipc / total,
+        "rest": (total - fwd - ipc) / total,
+        "ceiling": total / fwd if fwd > 0 else float("inf"),
+        "acc": acc,
+        "n_fwd": n_fwd,
+        "total": total,
+    }
+
+
+def _print_headroom(s: dict) -> None:
+    acc, total, n_fwd = s["acc"], s["total"], s["n_fwd"]
+    labels = {
+        "get": "get+unpickle", "rebuild": "rebuild views", "curate_h2d": "curate+H2D",
+        "forward": "model_forward (GPU)", "d2h_post": "D2H+post", "put": "pickle+put",
+    }
+    print(f"  SERVER per-request breakdown ({n_fwd} forwards, "
+          f"{s['ms_req']:.2f} ms/req):")
+    for stg in _STAGES:
+        print(f"    {labels[stg]:<22} {acc[stg] / total * 100:5.1f}%  "
+              f"{acc[stg] / n_fwd * 1e3:7.3f} ms")
+    print(f"  Tier-1 headroom (overlap all non-forward w/ compute): "
+          f"~{s['ceiling']:.2f}x   (forward = {s['fwd'] * 100:.0f}% of cycle)")
+    lever = ("pickle dominates -> shared-memory transport"
+             if s["ipc"] >= s["rest"]
+             else "transfer/prep dominates -> pinned + CUDA streams (Tier 1)")
+    print(f"    non-forward: ipc {s['ipc'] * 100:.0f}% (get+put)  vs  "
+          f"rest {s['rest'] * 100:.0f}% (rebuild+H2D+D2H)  ->  {lever}")
+
+
+def report(args, base_elapsed, fs_wall, results, profile) -> None:
     k = args.workers
-    base_steps = args.n_systems * args.n_steps
-    fs_steps = k * base_steps
-    base_tput = base_steps / base_elapsed  # system-steps / s
-    fs_tput = fs_steps / fs_wall
-    speedup = fs_tput / base_tput
-
     print("=" * 70)
     print("Force-server proof-of-concept")
     print("=" * 70)
@@ -396,23 +507,55 @@ def report(args, base_elapsed, fs_wall, results) -> None:
           f"atoms {args.n_atoms}   steps {args.n_steps}")
     print(f"  workers (K)  {k}")
     print("-" * 70)
-    print(f"  baseline (1 proc):  {base_elapsed:7.2f} s   "
-          f"{base_tput:10.0f} system-steps/s")
-    print(f"  force server (K={k}): {fs_wall:7.2f} s   "
-          f"{fs_tput:10.0f} system-steps/s")
-    print("-" * 70)
-    print(f"  SPEEDUP            {speedup:5.2f}x   "
-          f"(parallel efficiency {speedup / k * 100:4.0f}% of K)")
-    per = "  ".join(f"w{r[0]}:{r[2] - r[1]:.1f}s" for r in sorted(results))
-    print(f"  per-worker wall    {per}")
-    print("=" * 70)
-    if speedup < 1.05:
-        print("No gain -- likely IPC-bound or too few free CPU cores "
-              "(need >= K cores). Check --cpus-per-task.")
-    elif speedup >= 1.5:
-        print(f"Clear win: ~{speedup:.1f}x more sampling throughput on one GPU.")
+    if fs_wall < 0:
+        print("  force server: ABORTED (worker error, likely CUDA OOM).")
     else:
-        print("Modest gain -- try more workers (K) or check CPU-core availability.")
+        base_steps = args.n_systems * args.n_steps
+        base_tput = base_steps / base_elapsed
+        fs_tput = k * base_steps / fs_wall
+        speedup = fs_tput / base_tput
+        print(f"  baseline (1 proc):  {base_elapsed:7.2f} s   "
+              f"{base_tput:10.0f} system-steps/s")
+        print(f"  force server (K={k}): {fs_wall:7.2f} s   "
+              f"{fs_tput:10.0f} system-steps/s")
+        print(f"  SPEEDUP            {speedup:5.2f}x   "
+              f"(parallel efficiency {speedup / k * 100:4.0f}% of K)")
+        per = "  ".join(f"w{r[0]}:{r[2] - r[1]:.1f}s" for r in sorted(results))
+        print(f"  per-worker wall    {per}")
+    s = summarize(profile)
+    if s:
+        print("-" * 70)
+        _print_headroom(s)
+    print("=" * 70)
+
+
+def run_sweep(ctx, spec, pdb_path, z, args, sizes) -> None:
+    """Run the server headroom probe for each n-systems; print a summary table."""
+    print("=" * 78)
+    print(f"Server headroom sweep | model {args.model} | atoms {args.n_atoms} | "
+          f"K={args.workers} | steps {args.n_steps}")
+    print("=" * 78)
+    hdr = (f"{'n_sys':>6} {'ms/req':>8} {'fwd%':>6} {'ceiling':>9} "
+           f"{'ipc%':>6} {'rest%':>6} {'Msteps/s':>9}")
+    print(hdr)
+    print("-" * len(hdr))
+    for ns in sizes:
+        wall, results, profile = run_force_server(ctx, spec, pdb_path, z, args, ns)
+        s = summarize(profile)
+        if wall < 0 or s is None:
+            print(f"{ns:>6}  aborted (worker error / likely OOM); stopping sweep.")
+            break
+        tput = args.workers * ns * args.n_steps / wall / 1e6
+        print(f"{ns:>6} {s['ms_req']:>8.2f} {s['fwd'] * 100:>5.1f} "
+              f"{s['ceiling']:>8.2f}x {s['ipc'] * 100:>5.0f} {s['rest'] * 100:>5.0f} "
+              f"{tput:>9.3f}")
+    print("-" * len(hdr))
+    print("ceiling = 1/fwd% = max Tier-1 speedup if ALL non-forward overlaps compute.")
+    print("ipc = get+put (pickle -> shared memory).  rest = rebuild+H2D+D2H "
+          "(-> CUDA streams / pipeline).")
+    print("Msteps/s is the *instrumented* throughput (per-stage syncs add overhead).")
+    print("NOTE: 'get' includes any wait for the next request; with K>=2 and a")
+    print("saturated GPU it ~= unpickle. High ipc% with low throughput = starvation.")
 
 
 if __name__ == "__main__":
