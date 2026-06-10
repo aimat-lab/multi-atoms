@@ -39,10 +39,15 @@ import argparse
 import os
 import sys
 import time
+import warnings
 from dataclasses import dataclass
 
 import numpy as np
 import torch
+
+# ASE warns about `fixcm=True` once per process; under 'spawn' that floods the
+# log (one line per worker per grid cell). Silence it in every process.
+warnings.filterwarnings("ignore", category=FutureWarning)
 from ase import units
 from ase.io import read as ase_read
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
