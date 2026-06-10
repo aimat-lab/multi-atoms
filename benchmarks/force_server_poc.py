@@ -338,14 +338,14 @@ def run_baseline(ctx, spec, pdb_path, args) -> float:
 
 
 def run_force_server(
-    ctx, spec, pdb_path, z, args, n_systems
+    ctx, spec, pdb_path, z, args, n_systems, workers
 ) -> tuple[float, list, tuple]:
-    """Run K workers x n_systems against the instrumented server.
+    """Run ``workers`` x n_systems against the instrumented server.
 
     Returns (wall, results, profile). ``wall`` is the concurrent production span,
     or -1.0 if any worker failed (e.g. CUDA OOM at large n_systems).
     """
-    k = args.workers
+    k = workers
     req_q = ctx.Queue()
     res_qs = [ctx.Queue() for _ in range(k)]
     ready_q = ctx.Queue()
@@ -412,6 +412,11 @@ def main() -> None:
         help="Comma-separated n-systems values; run the server headroom probe for "
         "each and print a summary table (skips the single-process baseline).",
     )
+    parser.add_argument(
+        "--workers-sweep", default=None,
+        help="Comma-separated worker counts K; with --sweep, runs the full "
+        "(K x n-systems) grid. Defaults to just --workers.",
+    )
     args = parser.parse_args()
 
     if not torch.cuda.is_available():
@@ -436,7 +441,11 @@ def main() -> None:
 
     if args.sweep:
         sizes = [int(x) for x in args.sweep.split(",")]
-        run_sweep(ctx, spec, str(pdb_path), z, args, sizes)
+        workers_list = (
+            [int(x) for x in args.workers_sweep.split(",")]
+            if args.workers_sweep else [args.workers]
+        )
+        run_sweep(ctx, spec, str(pdb_path), z, args, sizes, workers_list)
         tmpdir.cleanup()
         return
 
@@ -446,7 +455,7 @@ def main() -> None:
     print(f"Phase B: force server, K={args.workers} workers x "
           f"{args.n_systems} systems ...")
     fs_wall, results, profile = run_force_server(
-        ctx, spec, str(pdb_path), z, args, args.n_systems
+        ctx, spec, str(pdb_path), z, args, args.n_systems, args.workers
     )
 
     tmpdir.cleanup()
@@ -529,33 +538,37 @@ def report(args, base_elapsed, fs_wall, results, profile) -> None:
     print("=" * 70)
 
 
-def run_sweep(ctx, spec, pdb_path, z, args, sizes) -> None:
-    """Run the server headroom probe for each n-systems; print a summary table."""
-    print("=" * 78)
+def run_sweep(ctx, spec, pdb_path, z, args, sizes, workers_list) -> None:
+    """Run the server headroom probe over a (workers x n-systems) grid."""
+    print("=" * 84)
     print(f"Server headroom sweep | model {args.model} | atoms {args.n_atoms} | "
-          f"K={args.workers} | steps {args.n_steps}")
-    print("=" * 78)
-    hdr = (f"{'n_sys':>6} {'ms/req':>8} {'fwd%':>6} {'ceiling':>9} "
+          f"K={workers_list} | steps {args.n_steps}")
+    print("=" * 84)
+    hdr = (f"{'K':>3} {'n_sys':>6} {'ms/req':>8} {'fwd%':>6} {'ceiling':>9} "
            f"{'ipc%':>6} {'rest%':>6} {'Msteps/s':>9}")
     print(hdr)
     print("-" * len(hdr))
-    for ns in sizes:
-        wall, results, profile = run_force_server(ctx, spec, pdb_path, z, args, ns)
-        s = summarize(profile)
-        if wall < 0 or s is None:
-            print(f"{ns:>6}  aborted (worker error / likely OOM); stopping sweep.")
-            break
-        tput = args.workers * ns * args.n_steps / wall / 1e6
-        print(f"{ns:>6} {s['ms_req']:>8.2f} {s['fwd'] * 100:>5.1f} "
-              f"{s['ceiling']:>8.2f}x {s['ipc'] * 100:>5.0f} {s['rest'] * 100:>5.0f} "
-              f"{tput:>9.3f}")
-    print("-" * len(hdr))
+    for k in workers_list:
+        for ns in sizes:
+            wall, results, profile = run_force_server(
+                ctx, spec, pdb_path, z, args, ns, k
+            )
+            s = summarize(profile)
+            if wall < 0 or s is None:
+                print(f"{k:>3} {ns:>6}  aborted (likely OOM); next K.")
+                break
+            tput = k * ns * args.n_steps / wall / 1e6
+            print(f"{k:>3} {ns:>6} {s['ms_req']:>8.2f} {s['fwd'] * 100:>5.1f} "
+                  f"{s['ceiling']:>8.2f}x {s['ipc'] * 100:>5.0f} "
+                  f"{s['rest'] * 100:>5.0f} {tput:>9.3f}")
+        print("-" * len(hdr))
     print("ceiling = 1/fwd% = max Tier-1 speedup if ALL non-forward overlaps compute.")
     print("ipc = get+put (pickle -> shared memory).  rest = rebuild+H2D+D2H "
           "(-> CUDA streams / pipeline).")
+    print("Server memory ~ one n_systems batch, independent of K -> same OOM ceiling.")
     print("Msteps/s is the *instrumented* throughput (per-stage syncs add overhead).")
-    print("NOTE: 'get' includes any wait for the next request; with K>=2 and a")
-    print("saturated GPU it ~= unpickle. High ipc% with low throughput = starvation.")
+    print("NOTE: 'get' includes any wait for the next request; saturated (K>=2) it")
+    print("~= unpickle. K=1 or small n_systems -> server starved -> ipc% inflated.")
 
 
 if __name__ == "__main__":
