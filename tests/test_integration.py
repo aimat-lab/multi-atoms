@@ -8,12 +8,14 @@ from typing import List
 import numpy as np
 import pytest
 import torch
+from ase import Atoms
 from greenlet import greenlet
 from torch import Tensor
 
 from multiatoms.core import (
     BatchedAtoms,
     MultiAtomAttribute,
+    MultiAtoms,
 )
 from multiatoms.model_manager import (
     ModelManager,
@@ -329,6 +331,35 @@ class TestFullPipelineIntegration:
         scheduler.kick_off()
 
         assert violations == [], f"systems read stale forces at {violations}"
+
+
+class TestMultiAtomsConstruction:
+    """MultiAtoms must replicate the template's full state into every system."""
+
+    def test_preserves_cell_and_pbc_from_atoms(self):
+        """Cell and PBC from a template Atoms are copied into each system."""
+        model_manager = DummyModelManager(DummyModel())
+        template = Atoms("H2", positions=[[0.0, 0.0, 0.0], [0.74, 0.0, 0.0]])
+        template.set_cell([12.0, 13.0, 14.0])
+        template.set_pbc(True)
+
+        multi = MultiAtoms(template=template, model_manager=model_manager, n_systems=3)
+
+        assert len(multi.atoms) == 3
+        for system in multi.atoms:
+            np.testing.assert_allclose(system.cell.lengths(), [12.0, 13.0, 14.0])
+            assert bool(system.pbc.all())
+
+    def test_systems_are_independent_copies(self):
+        """Mutating one system must not affect the others or the template."""
+        model_manager = DummyModelManager(DummyModel())
+        template = Atoms("H2", positions=[[0.0, 0.0, 0.0], [0.74, 0.0, 0.0]])
+
+        multi = MultiAtoms(template=template, model_manager=model_manager, n_systems=2)
+        multi.atoms[0].positions[0, 0] = 5.0
+
+        assert multi.atoms[1].positions[0, 0] == 0.0
+        assert template.positions[0, 0] == 0.0
 
 
 class TestMultiAtomAttribute:

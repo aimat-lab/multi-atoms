@@ -381,7 +381,7 @@ def main() -> None:
         mode = f"synthetic (hidden={args.hidden}, n_layers={args.n_layers})"
 
     multi = MultiAtoms(
-        pdb_path=pdb_path, model_manager=manager, n_systems=args.n_systems
+        template=pdb_path, model_manager=manager, n_systems=args.n_systems
     )
     n_atoms = len(multi.atoms[0])
 

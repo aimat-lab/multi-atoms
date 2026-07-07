@@ -188,7 +188,7 @@ class _ServerError:
 # --------------------------------------------------------------------------- #
 def setup_simulation(manager: ModelManager, pdb_path: str, n_systems: int, temp: float):
     multi = MultiAtoms(
-        pdb_path=pdb_path, model_manager=manager, n_systems=n_systems
+        template=pdb_path, model_manager=manager, n_systems=n_systems
     )
     multi.foreach(
         lambda a: MaxwellBoltzmannDistribution(a, temperature_K=temp), multi.atoms

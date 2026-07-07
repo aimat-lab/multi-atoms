@@ -95,7 +95,9 @@ class MyModelManager(ModelManager):
 device = "cuda" if torch.cuda.is_available() else "cpu"
 manager = MyModelManager(model=my_model.to(device).eval(), device=device)
 
-multi = MultiAtoms(pdb_path="system.pdb", model_manager=manager, n_systems=64)
+# `template` accepts an ASE Atoms object or a path to any ASE-readable file
+# (PDB, xyz, CIF, ...); its cell, PBC and constraints are copied into each system.
+multi = MultiAtoms(template="system.pdb", model_manager=manager, n_systems=64)
 
 # Per-system setup runs serially (no GPU calls here):
 multi.foreach(lambda a: MaxwellBoltzmannDistribution(a, temperature_K=300), multi.atoms)

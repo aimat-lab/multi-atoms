@@ -118,7 +118,7 @@ def _worker_main(worker_id, pdb_path, n_systems, fn, seed, req_q, res_q) -> None
     try:
         manager = RemoteModelManager(req_q, res_q, worker_id)
         multi = MultiAtoms(
-            pdb_path=pdb_path, model_manager=manager, n_systems=n_systems
+            template=pdb_path, model_manager=manager, n_systems=n_systems
         )
         result = fn(multi, worker_id)
     except Exception:
@@ -176,7 +176,7 @@ class PolyAtoms:
         """
         if self._workers is None:
             multi = MultiAtoms(
-                pdb_path=self._pdb_path,
+                template=self._pdb_path,
                 model_manager=self._model_manager,
                 n_systems=self._n_systems,
             )
