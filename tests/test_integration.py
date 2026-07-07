@@ -279,6 +279,57 @@ class TestFullPipelineIntegration:
             expected = -initial_positions[i]
             np.testing.assert_allclose(collected_forces[i], expected, rtol=1e-5)
 
+    def test_heterogeneous_completion_no_stale_forces(self):
+        """Systems that finish at different times must never read stale forces.
+
+        Regression test for the scheduler round-boundary bug: when the last
+        greenlet in the pool finishes mid-round, the systems that already
+        yielded that round used to resume with forces from the *previous*
+        round. With forces = -positions, any force read that does not match the
+        system's current positions is a stale read -> we catch it directly.
+
+        The trailing greenlet is given the *fewest* evaluations so it dies at
+        the wrap position, which is exactly the condition that triggered the bug.
+        """
+        model = DummyModel()
+        model_manager = DummyModelManager(model)
+        n_atoms = 2
+        scheduler = HubScheduler(model_manager)
+
+        def build(seed):
+            rng = np.random.default_rng(seed)
+            atom = BatchedAtoms(
+                model_manager=model_manager,
+                scheduler=scheduler,
+                symbols=["H", "H"],
+                positions=rng.uniform(0.0, 3.0, size=(n_atoms, 3)),
+            )
+            atom.calc = ProxyCalculator(n_atoms=n_atoms)
+            atom._parallel_mode = True
+            return atom
+
+        # (atom, n_force_evals) — earlier system runs longer, trailing one dies first.
+        specs = [(build(0), 3), (build(1), 2)]
+        violations = []
+
+        def make_worker(atom, n_evals, idx):
+            def worker():
+                for step in range(n_evals):
+                    forces = atom.get_forces()
+                    if not np.allclose(forces, -atom.get_positions(), atol=1e-4):
+                        violations.append((idx, step))
+                    atom.set_positions(atom.get_positions() + 0.05 * forces)
+
+            return worker
+
+        greenlets = [
+            greenlet(make_worker(atom, n, i)) for i, (atom, n) in enumerate(specs)
+        ]
+        scheduler.set_greenlet_pool(greenlets)
+        scheduler.kick_off()
+
+        assert violations == [], f"systems read stale forces at {violations}"
+
 
 class TestMultiAtomAttribute:
     """Tests for MultiAtomAttribute proxy class."""

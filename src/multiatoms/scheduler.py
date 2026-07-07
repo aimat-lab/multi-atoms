@@ -142,8 +142,13 @@ class HubScheduler:
                 if not self._greenlet_pool:
                     break
 
-                # If we removed the last element, wrap index back to start
+                # Removing the last element wraps the index back to the start,
+                # which completes a round just like the normal advance below.
+                # Flush the pending batch *before* resuming the greenlet at
+                # index 0, otherwise it would resume with stale forces from the
+                # previous round (it yielded this round but was never computed).
                 if self._current_idx == len(self._greenlet_pool):
+                    self._run_pending_batch()
                     self._current_idx = 0
 
                 # Skip the normal index advance - we already have a new greenlet
@@ -156,8 +161,18 @@ class HubScheduler:
 
             # Round complete - run batched forward pass
             if self._current_idx == 0:
-                self.model_manager.compute_energy_and_forces(self._collected_atoms)
-                self._collected_atoms = []
+                self._run_pending_batch()
+
+    def _run_pending_batch(self) -> None:
+        """Compute the collected round's batch and reset the collection buffer.
+
+        A "round" ends whenever the index returns to 0 -- via the normal advance
+        or via the wrap forced by removing the last greenlet. Both transitions
+        are about to resume a greenlet that already yielded this round, so the
+        batched forward pass must run first. Empty batches are a safe no-op.
+        """
+        self.model_manager.compute_energy_and_forces(self._collected_atoms)
+        self._collected_atoms = []
 
     def clear(self) -> None:
         """Clear the greenlet pool after execution completes."""

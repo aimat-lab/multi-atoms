@@ -253,20 +253,17 @@ class TestKickOff:
             scheduler.kick_off()
 
     def test_greenlets_die_in_sequence(self):
-        """Test greenlets dying one by one.
+        """Greenlets dying one by one must still get a batch for every yield.
 
-        Trace through scheduler behavior:
-        - Pool: [g0(1), g1(2), g2(3)] (yields remaining)
-        - idx=0: g0 yields atom0, switch back, idx=1
-        - idx=1: g1 yields atom1, switch back, idx=2
-        - idx=2: g2 yields atom2, switch back, idx=0 -> BATCH [0,1,2]
-        - idx=0: g0 dies (no yield), swap with last -> pool=[g2,g1], continue at idx=0
-        - idx=0: g2 yields atom2, switch back, idx=1
-        - idx=1: g1 yields atom1, switch back, idx=0 -> BATCH [2,1]
-        - idx=0: g2 yields atom2, switch back, idx=1
-        - idx=1: g1 dies, swap with last -> pool=[g2], continue at idx=1
-        - idx=1 == len(pool)=1, so idx wraps to 0
-        - idx=0: g2 dies, pool becomes empty -> break
+        Pool [g0(1), g1(2), g2(3)] (yields remaining):
+        - Round 1: all 3 yield -> BATCH [0,1,2]
+        - g0 dies (swapped out); pool=[g2, g1]
+        - Round 2: g2 and g1 yield -> BATCH [2, 1]
+        - g2 yields a third time; g1 then dies, wrapping the index to 0. That
+          wrap completes the round, so g2's third yield IS flushed -> BATCH [2]
+        - g2 dies, pool empties -> break
+
+        Every yield gets computed: no greenlet resumes with stale forces.
         """
         gpu_forward = MockModelManager()
         scheduler = HubScheduler(gpu_forward)
@@ -289,36 +286,27 @@ class TestKickOff:
         scheduler.set_greenlet_pool(greenlets)
         scheduler.kick_off()
 
-        # Based on actual scheduler behavior:
-        # - Round 1: all 3 yield -> batch of 3
-        # - g0 dies, gets swapped out
-        # - Round 2: g2 and g1 yield -> batch of 2
-        # - g2 yields again but then g1 dies before round completes, so g2's
-        #   third yield doesn't trigger a batch before the pool empties
-        assert len(gpu_forward.batch_calls) == 2
+        assert len(gpu_forward.batch_calls) == 3
         assert len(gpu_forward.batch_calls[0]) == 3
         assert len(gpu_forward.batch_calls[1]) == 2
+        assert len(gpu_forward.batch_calls[2]) == 1
 
 
 class TestSchedulerEdgeCases:
     """Edge case tests for scheduler behavior."""
 
     def test_last_greenlet_dies_wrap_around(self):
-        """Test when the last greenlet in pool dies and index needs to wrap.
+        """When the last greenlet dies and wraps the index, the round still flushes.
 
         Trace through:
         - Pool: [g0(2), g1(2), g2(1)]
-        - idx=0: g0 yields, idx=1
-        - idx=1: g1 yields, idx=2
-        - idx=2: g2 yields, idx=0 -> BATCH [0,1,2]
-        - idx=0: g0 yields, idx=1
-        - idx=1: g1 yields, idx=2
-        - idx=2: g2 dies, swap with last (itself), pop -> pool=[g0,g1]
-        - idx=2 == len(pool)=2, wrap to idx=0, continue (skip batch)
-        - idx=0: g0 dies, swap with g1 -> pool=[g1], continue
-        - idx=0: g1 dies -> pool empty, break
-
-        Only the first round triggers a batch due to continue statements.
+        - Round 1: g0, g1, g2 yield -> idx wraps to 0 -> BATCH [0,1,2]
+        - g0 yields (2nd), g1 yields (2nd); collected=[0,1]
+        - idx=2: g2 dies, pop -> pool=[g0,g1]; idx == len(pool) wraps to 0.
+          That wrap completes the round, so collected=[0,1] IS flushed
+          -> BATCH [0,1] (before the fix this batch was dropped and g0/g1
+          resumed with stale forces)
+        - g0 dies, then g1 dies -> pool empty, break
         """
         gpu_forward = MockModelManager()
         scheduler = HubScheduler(gpu_forward)
@@ -341,10 +329,11 @@ class TestSchedulerEdgeCases:
         scheduler.set_greenlet_pool(greenlets)
         scheduler.kick_off()
 
-        # Only the first round's batch is triggered; subsequent rounds are
-        # interrupted by greenlet deaths which use continue, skipping batches
-        assert len(gpu_forward.batch_calls) == 1
+        # Both rounds flush: g0/g1's second yield is computed even though g2
+        # died and forced an early wrap.
+        assert len(gpu_forward.batch_calls) == 2
         assert len(gpu_forward.batch_calls[0]) == 3
+        assert len(gpu_forward.batch_calls[1]) == 2
 
     def test_first_greenlet_dies_swap_behavior(self):
         """Test swap-with-last behavior when first greenlet dies."""
