@@ -162,4 +162,4 @@ pixi run format   # ruff format
 
 ## License
 
-TODO
+MIT — see [LICENSE](LICENSE).
