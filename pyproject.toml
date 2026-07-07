@@ -37,5 +37,10 @@ line-length = 88
 [tool.ruff.lint]
 select = ["E", "F", "I"]
 
+[tool.ruff.lint.per-file-ignores]
+# Benchmark entry points filter warnings / adjust sys.path before importing, so
+# their module-level imports legitimately follow other statements.
+"benchmarks/*" = ["E402"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

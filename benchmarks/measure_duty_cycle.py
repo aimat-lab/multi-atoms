@@ -288,7 +288,8 @@ def build_schnet(args, device: str) -> tuple[_MM, Path, tempfile.TemporaryDirect
     """The real SchNet backbone (torch_geometric) + a temp PDB.
 
     To mirror the ISSNet config, pass ``--hidden 32 --n-layers 3 --n-gaussians 32``;
-    ``--hidden``/``--n-layers`` map to SchNet's ``hidden_channels``/``num_interactions``.
+    ``--hidden``/``--n-layers`` map to SchNet's
+    ``hidden_channels``/``num_interactions``.
     """
     pdb_path, tmpdir = _template_pdb(args)
     model = BenchSchNet(
