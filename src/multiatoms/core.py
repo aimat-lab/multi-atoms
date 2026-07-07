@@ -101,6 +101,25 @@ class BatchedAtoms(Atoms):
 
         return super().get_forces(apply_constraint, md)
 
+    def get_potential_energy(self, force_consistent=False, apply_constraint=True):
+        """Get potential energy, batched or via direct GPU call like get_forces().
+
+        The batched forward pass computes energy and forces together, so this
+        mirrors get_forces(): in parallel mode it yields to the scheduler (energy
+        comes from the same batch as everyone else's forces); in single mode it
+        calls the ModelManager directly. The per-atom position cache means this
+        adds no extra forward pass when forces were already evaluated at the
+        current positions.
+        """
+        if self._parallel_mode:
+            self.scheduler.yield_to_next(self)
+        else:
+            self.model_manager.compute_energy_and_forces([self])
+
+        return super().get_potential_energy(
+            force_consistent=force_consistent, apply_constraint=apply_constraint
+        )
+
 
 class MultiAtoms:
     """Manages multiple parallel molecular dynamics simulations."""

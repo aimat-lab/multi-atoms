@@ -281,6 +281,61 @@ class TestFullPipelineIntegration:
             expected = -initial_positions[i]
             np.testing.assert_allclose(collected_forces[i], expected, rtol=1e-5)
 
+    def test_get_potential_energy_parallel_matches_positions(self):
+        """Energy read in parallel mode reflects the system's current positions."""
+        model = DummyModel()
+        model_manager = DummyModelManager(model)
+        n_atoms = 2
+        scheduler = HubScheduler(model_manager)
+
+        positions = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+        atom = BatchedAtoms(
+            model_manager=model_manager,
+            scheduler=scheduler,
+            symbols=["H", "H"],
+            positions=positions,
+        )
+        atom.calc = ProxyCalculator(n_atoms=n_atoms)
+        atom._parallel_mode = True
+
+        energies = []
+
+        def worker():
+            energies.append(atom.get_potential_energy())
+
+        greenlets = [greenlet(worker)]
+        scheduler.set_greenlet_pool(greenlets)
+        scheduler.kick_off()
+
+        # DummyModel energy = sum(pos * 0.1) * 10 = sum(pos) = 1+2+...+6 = 21
+        assert energies[0] == pytest.approx(21.0)
+
+    def test_energy_after_forces_reuses_cache(self):
+        """Reading energy right after forces at the same positions adds no forward."""
+        model = DummyModel()
+        model_manager = DummyModelManager(model)
+        n_atoms = 2
+        scheduler = HubScheduler(model_manager)
+
+        atom = BatchedAtoms(
+            model_manager=model_manager,
+            scheduler=scheduler,
+            symbols=["H", "H"],
+            positions=np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]),
+        )
+        atom.calc = ProxyCalculator(n_atoms=n_atoms)
+        atom._parallel_mode = True
+
+        def worker():
+            atom.get_forces()
+            atom.get_potential_energy()  # same positions -> cache hit
+
+        greenlets = [greenlet(worker)]
+        scheduler.set_greenlet_pool(greenlets)
+        scheduler.kick_off()
+
+        assert model.forward_count == 1
+
     def test_heterogeneous_completion_no_stale_forces(self):
         """Systems that finish at different times must never read stale forces.
 
