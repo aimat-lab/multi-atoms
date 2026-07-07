@@ -46,7 +46,7 @@ class MockModel:
         # Return negative positions as forces (simple test pattern)
         return -pos
 
-    def cleanup(self):
+    def clean_up(self):
         pass
 
 

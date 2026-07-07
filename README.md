@@ -123,7 +123,7 @@ multi.clean_up()
   custom calling convention.
 - **`post_process_hook(forces, energy) -> (forces, energy)`** *(optional)* — unit
   conversion / scaling before distribution. Defaults to identity.
-- **`cleanup()`** *(optional)* — defaults to calling `model.cleanup()` if present.
+- **`clean_up()`** *(optional)* — defaults to calling `model.clean_up()` if present.
 
 Forces and energies must come back in ASE units (eV / eV·Å⁻¹); positions handed
 to `curate_batch` are in Å.

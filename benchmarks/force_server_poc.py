@@ -174,7 +174,7 @@ class RemoteModelManager(ModelManager):
         for atom in to_compute:
             atom._cached_positions = atom.positions.copy()
 
-    def cleanup(self) -> None:  # no local model to clean up
+    def clean_up(self) -> None:  # no local model to clean up
         pass
 
 
@@ -283,7 +283,7 @@ def server_main(
         n_fwd += 1
 
     profile_q.put((acc, n_fwd))
-    manager.cleanup()
+    manager.clean_up()
 
 
 def baseline_main(spec, pdb_path, n_systems, n_steps, warmup, temp, out_q) -> None:

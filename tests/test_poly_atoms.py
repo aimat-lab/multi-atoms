@@ -33,7 +33,7 @@ class HarmonicModel:
     def get_forces(self, energy: Tensor, pos: Tensor) -> Tensor:
         return -pos
 
-    def cleanup(self) -> None:
+    def clean_up(self) -> None:
         pass
 
 

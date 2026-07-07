@@ -156,7 +156,7 @@ class SyntheticPotential(nn.Module):
         (grad,) = torch.autograd.grad(energy.sum(), pos, create_graph=False)
         return -grad
 
-    def cleanup(self) -> None:
+    def clean_up(self) -> None:
         pass
 
 
@@ -215,7 +215,7 @@ class BenchSchNet(nn.Module):
         (grad,) = torch.autograd.grad(energy.sum(), pos, create_graph=False)
         return -grad
 
-    def cleanup(self) -> None:
+    def clean_up(self) -> None:
         pass
 
 

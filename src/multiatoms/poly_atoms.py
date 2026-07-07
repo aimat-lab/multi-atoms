@@ -109,7 +109,7 @@ class RemoteModelManager(ModelManager):
             raise RuntimeError(f"GPU force server failed:\n{reply.message}")
         return reply  # (forces, energy), already post-processed by the server
 
-    def cleanup(self) -> None:  # no local model to clean up
+    def clean_up(self) -> None:  # no local model to clean up
         pass
 
 
@@ -140,7 +140,7 @@ class PolyAtoms:
         pdb_path: Template structure (same for every worker).
         model_manager: A live ``ModelManager`` on the GPU; stays in the main
             process and serves all workers. Owned by ``PolyAtoms`` -- its
-            ``cleanup()`` runs on context-manager exit.
+            ``clean_up()`` runs on context-manager exit.
         n_systems: Systems per worker.
         workers: Number of worker processes K. ``None`` runs a single in-main
             ``MultiAtoms`` (no IPC, no overlap); ``1`` uses the real pool with
@@ -164,7 +164,7 @@ class PolyAtoms:
         return self
 
     def __exit__(self, *exc) -> bool:
-        self._model_manager.cleanup()
+        self._model_manager.clean_up()
         return False
 
     def run(

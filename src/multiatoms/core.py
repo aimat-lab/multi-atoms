@@ -292,7 +292,7 @@ class MultiAtoms:
 
     def clean_up(self):
         """Clean up model resources."""
-        self._batch_processor.cleanup()
+        self._batch_processor.clean_up()
 
 
 class MultiAtomAttribute:

@@ -199,14 +199,14 @@ class ModelManager(ABC):
         for i, atom in enumerate(atoms_list):
             atom.calc.set_results(forces, energy, atom_index=i)
 
-    def cleanup(self) -> None:
+    def clean_up(self) -> None:
         """Clean up model resources.
 
-        Override if your model needs cleanup (e.g., multiprocessing workers).
-        Default: calls model.cleanup() if it exists.
+        Override if your model needs teardown (e.g., multiprocessing workers).
+        Default: calls the model's ``clean_up()`` if it has one.
         """
-        if hasattr(self.model, "cleanup"):
-            self.model.cleanup()
+        if hasattr(self.model, "clean_up"):
+            self.model.clean_up()
 
 
 class PolyAtomModelManagerDecorator(ModelManager):

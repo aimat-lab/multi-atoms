@@ -57,7 +57,7 @@ class DummyModel:
         # Forces = -positions (restoring force toward origin)
         return -pos
 
-    def cleanup(self):
+    def clean_up(self):
         pass
 
 
