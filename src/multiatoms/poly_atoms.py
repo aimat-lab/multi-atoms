@@ -6,7 +6,7 @@ the integrators step, the GPU is idle -- measured at ~45% of wall-clock for a
 SchNet potential. ``PolyAtoms`` reclaims that idle time: it runs ``workers``
 independent ``MultiAtoms`` simulations in separate processes, each shipping its
 force requests to one central GPU server. While worker A integrates on the CPU,
-the GPU is busy with worker B's batch. Benchmarked at ~1.9x throughput on one
+the GPU is busy with worker B's batch. Benchmarked at ~1.8x throughput on one
 A100 with K=2.
 
 Design
