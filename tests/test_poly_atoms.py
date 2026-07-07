@@ -114,3 +114,22 @@ def test_seed_count_mismatch_raises(template_pdb):
     with PolyAtoms(template_pdb, _make_manager(), n_systems=2, workers=2) as poly:
         with pytest.raises(ValueError, match="one seed per worker"):
             poly.run(simulate, seeds=[0])
+
+
+def hard_crash(multi: MultiAtoms, worker_id: int) -> list:
+    """Top-level so spawn can pickle it. Dies hard without sending _KIND_DONE."""
+    import os
+
+    os._exit(1)
+
+
+def test_hard_worker_death_raises_not_hangs(template_pdb, monkeypatch):
+    """A worker that dies without reporting must fail the run, not hang it."""
+    from multiatoms import poly_atoms
+
+    # Shrink the liveness poll so the test does not wait the full timeout.
+    monkeypatch.setattr(poly_atoms, "_POLL_TIMEOUT_S", 0.2)
+
+    with PolyAtoms(template_pdb, _make_manager(), n_systems=2, workers=1) as poly:
+        with pytest.raises(RuntimeError, match="died without returning a result"):
+            poly.run(hard_crash, seeds=[0])
