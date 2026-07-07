@@ -57,16 +57,29 @@ def _validate_iterables(iterables: tuple[Iterable, ...]) -> List[List]:
 class BatchedAtoms(Atoms):
     """Atoms subclass that hooks get_forces() to yield or call GPU directly."""
 
-    def __init__(self, model_manager: ModelManager, scheduler: HubScheduler, **kwargs):
+    def __init__(
+        self,
+        model_manager: ModelManager,
+        scheduler: HubScheduler,
+        template: Atoms | None = None,
+        **kwargs,
+    ):
         """Initialize BatchedAtoms.
 
         Args:
             model_manager: ModelManager for GPU computation
             scheduler: HubScheduler for parallel mode coordination
-            **kwargs: Arguments passed to ASE Atoms constructor
-                (symbols, positions, etc.)
+            template: Optional ASE ``Atoms`` to copy full state from -- positions,
+                cell, periodic boundary conditions, constraints, charges. The copy
+                is independent, so systems never share arrays. When given,
+                ``kwargs`` are ignored.
+            **kwargs: Arguments passed to the ASE Atoms constructor
+                (symbols, positions, ...) when no template is given.
         """
-        super().__init__(**kwargs)
+        if template is not None:
+            super().__init__(template)
+        else:
+            super().__init__(**kwargs)
         self.model_manager = model_manager
         self.scheduler = scheduler
         self._parallel_mode: bool = False
@@ -88,28 +101,53 @@ class BatchedAtoms(Atoms):
 
         return super().get_forces(apply_constraint, md)
 
+    def get_potential_energy(self, force_consistent=False, apply_constraint=True):
+        """Get potential energy, batched or via direct GPU call like get_forces().
+
+        The batched forward pass computes energy and forces together, so this
+        mirrors get_forces(): in parallel mode it yields to the scheduler (energy
+        comes from the same batch as everyone else's forces); in single mode it
+        calls the ModelManager directly. The per-atom position cache means this
+        adds no extra forward pass when forces were already evaluated at the
+        current positions.
+        """
+        if self._parallel_mode:
+            self.scheduler.yield_to_next(self)
+        else:
+            self.model_manager.compute_energy_and_forces([self])
+
+        return super().get_potential_energy(
+            force_consistent=force_consistent, apply_constraint=apply_constraint
+        )
+
 
 class MultiAtoms:
     """Manages multiple parallel molecular dynamics simulations."""
 
     def __init__(
         self,
-        pdb_path: Path,
+        template: Atoms | str | Path,
         model_manager: ModelManager,
         n_systems: int = 1,
     ):
         """Initialize MultiAtoms with parallel simulation systems.
 
-        Creates BatchedAtoms instances from a template PDB structure and sets up
+        Creates BatchedAtoms instances from a template structure and sets up
         the hub scheduler and model manager for batched computation.
 
         Args:
-            pdb_path: Path to PDB file for template structure
+            template: The system to replicate, as an ASE ``Atoms`` object or a
+                path to any ASE-readable structure file (PDB, xyz, CIF, ...).
+                Its full state -- cell, periodic boundary conditions,
+                constraints, charges -- is copied into every system.
             model_manager: ModelManager for model input/output handling
             n_systems: Number of parallel systems to create
         """
-        template = ase.io.read(pdb_path)
-        n_atoms = len(template)
+        if isinstance(template, Atoms):
+            template_atoms = template.copy()
+        else:
+            template_atoms = ase.io.read(template)
+        n_atoms = len(template_atoms)
 
         logger.info(
             f"Creating MultiAtoms with {n_systems} systems "
@@ -121,17 +159,16 @@ class MultiAtoms:
         self._scheduler = HubScheduler(self._model_manager)
         self._batch_processor = model_manager
         self._n_systems = n_systems
-        self._pdb_path = pdb_path
 
-        # Create atoms list
+        # Each BatchedAtoms deep-copies the template, so cell/pbc/constraints
+        # are preserved and the systems stay fully independent.
         self._atoms_list: List[BatchedAtoms] = []
 
         for i in range(n_systems):
             batched_atom = BatchedAtoms(
                 model_manager=self._model_manager,
                 scheduler=self._scheduler,
-                symbols=template.get_chemical_symbols(),
-                positions=template.get_positions().copy(),
+                template=template_atoms,
             )
             batched_atom.calc = ProxyCalculator(n_atoms=n_atoms)
             self._atoms_list.append(batched_atom)
@@ -255,7 +292,7 @@ class MultiAtoms:
 
     def clean_up(self):
         """Clean up model resources."""
-        self._batch_processor.cleanup()
+        self._batch_processor.clean_up()
 
 
 class MultiAtomAttribute:

@@ -1,5 +1,5 @@
 [workspace]
-authors = ["Paul Link <cq3730@partner.kit.edu>"]
+authors = ["Paul Link <paul.link@student.kit.edu>"]
 channels = ["pytorch", "conda-forge"]
 name = "multiatoms"
 platforms = ["linux-64"]
@@ -34,7 +34,7 @@ cpuonly = { version = "*", channel = "pytorch" }
 # torch_geometric, so the install just sits unused).
 #
 # SchNet's radius_graph needs `torch_cluster`, installed from a wheel that is
-# pinned to an exact torch + CUDA + python build. We reuse the ML repo's proven
+# pinned to an exact torch + CUDA + python build. We use a known-good prebuilt
 # wheel (torch 2.5 / cu118 / cp311), so this whole feature must pin to match it.
 # cu118 binaries run fine on CUDA 12 drivers (backward compatible).
 [feature.bench]

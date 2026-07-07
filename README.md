@@ -95,7 +95,9 @@ class MyModelManager(ModelManager):
 device = "cuda" if torch.cuda.is_available() else "cpu"
 manager = MyModelManager(model=my_model.to(device).eval(), device=device)
 
-multi = MultiAtoms(pdb_path="system.pdb", model_manager=manager, n_systems=64)
+# `template` accepts an ASE Atoms object or a path to any ASE-readable file
+# (PDB, xyz, CIF, ...); its cell, PBC and constraints are copied into each system.
+multi = MultiAtoms(template="system.pdb", model_manager=manager, n_systems=64)
 
 # Per-system setup runs serially (no GPU calls here):
 multi.foreach(lambda a: MaxwellBoltzmannDistribution(a, temperature_K=300), multi.atoms)
@@ -121,7 +123,7 @@ multi.clean_up()
   custom calling convention.
 - **`post_process_hook(forces, energy) -> (forces, energy)`** *(optional)* — unit
   conversion / scaling before distribution. Defaults to identity.
-- **`cleanup()`** *(optional)* — defaults to calling `model.cleanup()` if present.
+- **`clean_up()`** *(optional)* — defaults to calling `model.clean_up()` if present.
 
 Forces and energies must come back in ASE units (eV / eV·Å⁻¹); positions handed
 to `curate_batch` are in Å.
@@ -160,4 +162,4 @@ pixi run format   # ruff format
 
 ## License
 
-TODO
+MIT — see [LICENSE](LICENSE).

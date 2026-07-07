@@ -174,7 +174,7 @@ class RemoteModelManager(ModelManager):
         for atom in to_compute:
             atom._cached_positions = atom.positions.copy()
 
-    def cleanup(self) -> None:  # no local model to clean up
+    def clean_up(self) -> None:  # no local model to clean up
         pass
 
 
@@ -188,7 +188,7 @@ class _ServerError:
 # --------------------------------------------------------------------------- #
 def setup_simulation(manager: ModelManager, pdb_path: str, n_systems: int, temp: float):
     multi = MultiAtoms(
-        pdb_path=pdb_path, model_manager=manager, n_systems=n_systems
+        template=pdb_path, model_manager=manager, n_systems=n_systems
     )
     multi.foreach(
         lambda a: MaxwellBoltzmannDistribution(a, temperature_K=temp), multi.atoms
@@ -283,7 +283,7 @@ def server_main(
         n_fwd += 1
 
     profile_q.put((acc, n_fwd))
-    manager.cleanup()
+    manager.clean_up()
 
 
 def baseline_main(spec, pdb_path, n_systems, n_steps, warmup, temp, out_q) -> None:

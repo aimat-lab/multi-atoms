@@ -47,6 +47,7 @@ worker re-import of your script does not rebuild it on the GPU.
 from __future__ import annotations
 
 import multiprocessing as mp
+import queue
 import traceback
 from pathlib import Path
 from typing import Any, Callable, List, Optional
@@ -60,6 +61,11 @@ from multiatoms.model_manager import ModelManager
 # Message kinds on the shared request queue (worker -> server).
 _KIND_FORCES = 0  # payload: positions array (n_systems, n_atoms, 3)
 _KIND_DONE = 1  # payload: the worker's fn result (or _WorkerError)
+
+# How long the server waits for a message before checking worker liveness. Only
+# affects how quickly a hard worker death is noticed, not steady-state
+# throughput -- a pending message is returned immediately.
+_POLL_TIMEOUT_S = 5.0
 
 
 class _WorkerError:
@@ -103,7 +109,7 @@ class RemoteModelManager(ModelManager):
             raise RuntimeError(f"GPU force server failed:\n{reply.message}")
         return reply  # (forces, energy), already post-processed by the server
 
-    def cleanup(self) -> None:  # no local model to clean up
+    def clean_up(self) -> None:  # no local model to clean up
         pass
 
 
@@ -118,7 +124,7 @@ def _worker_main(worker_id, pdb_path, n_systems, fn, seed, req_q, res_q) -> None
     try:
         manager = RemoteModelManager(req_q, res_q, worker_id)
         multi = MultiAtoms(
-            pdb_path=pdb_path, model_manager=manager, n_systems=n_systems
+            template=pdb_path, model_manager=manager, n_systems=n_systems
         )
         result = fn(multi, worker_id)
     except Exception:
@@ -134,7 +140,7 @@ class PolyAtoms:
         pdb_path: Template structure (same for every worker).
         model_manager: A live ``ModelManager`` on the GPU; stays in the main
             process and serves all workers. Owned by ``PolyAtoms`` -- its
-            ``cleanup()`` runs on context-manager exit.
+            ``clean_up()`` runs on context-manager exit.
         n_systems: Systems per worker.
         workers: Number of worker processes K. ``None`` runs a single in-main
             ``MultiAtoms`` (no IPC, no overlap); ``1`` uses the real pool with
@@ -158,7 +164,7 @@ class PolyAtoms:
         return self
 
     def __exit__(self, *exc) -> bool:
-        self._model_manager.cleanup()
+        self._model_manager.clean_up()
         return False
 
     def run(
@@ -176,7 +182,7 @@ class PolyAtoms:
         """
         if self._workers is None:
             multi = MultiAtoms(
-                pdb_path=self._pdb_path,
+                template=self._pdb_path,
                 model_manager=self._model_manager,
                 n_systems=self._n_systems,
             )
@@ -213,21 +219,51 @@ class PolyAtoms:
 
         results: List[Any] = [None] * k
         try:
-            self._serve(k, req_q, res_qs, views, results)
+            self._serve(k, req_q, res_qs, views, results, procs)
         finally:
+            # A hard death aborts the run with survivors still blocked on a
+            # force reply; terminate them so nothing is left orphaned.
+            for p in procs:
+                if p.is_alive():
+                    p.terminate()
             for p in procs:
                 p.join()
 
         self._raise_on_worker_error(results)
         return results
 
-    def _serve(self, k, req_q, res_qs, views, results) -> None:
-        """Main-process server loop: answer force requests until all K workers done."""
+    def _serve(self, k, req_q, res_qs, views, results, procs) -> None:
+        """Main-process server loop: answer force requests until all K workers done.
+
+        Waits on the request queue with a timeout so a worker that dies hard
+        (segfault / OOM / kill) without sending ``_KIND_DONE`` is noticed
+        instead of hanging the server forever. On such a death we fail fast:
+        the surviving workers share the same model and GPU, so they are almost
+        certainly doomed too and continuing would only burn compute.
+
+        Detection is deferred, not instantaneous. Each worker is synchronous --
+        it sends one force request then blocks on its reply -- so a live worker
+        keeps the queue busy and the ``Empty`` timeout (where the liveness check
+        runs) only fires once the queue drains, i.e. once every surviving worker
+        has finished or is blocked. The run therefore never hangs, but if other
+        workers are still doing useful steps when one crashes, the abort happens
+        when they wind down rather than the instant of the crash.
+        """
+        done = [False] * k
         remaining = k
         while remaining:
-            kind, worker_id, payload = req_q.get()
+            try:
+                kind, worker_id, payload = req_q.get(timeout=_POLL_TIMEOUT_S)
+            except queue.Empty:
+                # No message for a while -- check whether a worker crashed. A
+                # cleanly finished worker always enqueues its DONE before
+                # exiting, so if the queue is idle any dead worker died hard.
+                self._check_for_dead_worker(procs, done)
+                continue
+
             if kind == _KIND_DONE:
                 results[worker_id] = payload
+                done[worker_id] = True
                 remaining -= 1
                 continue
 
@@ -241,6 +277,16 @@ class PolyAtoms:
                 res_qs[worker_id].put(_ServerError(traceback.format_exc()))
             else:
                 res_qs[worker_id].put((forces, energy))
+
+    @staticmethod
+    def _check_for_dead_worker(procs, done) -> None:
+        """Raise if a worker exited without reporting a result (hard crash)."""
+        for i, p in enumerate(procs):
+            if not done[i] and p.exitcode is not None:
+                raise RuntimeError(
+                    f"PolyAtoms worker {i} died without returning a result "
+                    f"(exit code {p.exitcode}); aborting the run."
+                )
 
     @staticmethod
     def _raise_on_worker_error(results) -> None:

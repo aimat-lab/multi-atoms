@@ -32,10 +32,11 @@ not representative):
     # match your system size:
     pixi run python benchmarks/measure_duty_cycle.py --n-systems 256 --n-steps 200
 
-    # The real SchNet backbone (mirrors the ML repo's SchNet/ISSNet, minus the
-    # Amber prior). The model knobs default to the ISSNet config, so just pick a
-    # batch width (--n-systems) and per-system size (--n-atoms). Needs the `bench`
-    # env, which pins torch 2.5 / cu118 / cp311 to match the torch_cluster wheel:
+    # A representative SchNet backbone (torch_geometric SchNet + autograd forces)
+    # standing in for a real implicit-solvent ML potential. The knobs default to
+    # a typical config, so just pick a batch width (--n-systems) and per-system
+    # size (--n-atoms). Needs the `bench` env, which pins torch 2.5 / cu118 /
+    # cp311 to match the torch_cluster wheel:
     pixi run -e bench python benchmarks/measure_duty_cycle.py \
         --model schnet --n-systems 256 --n-atoms 60 --n-steps 200
 
@@ -156,7 +157,7 @@ class SyntheticPotential(nn.Module):
         (grad,) = torch.autograd.grad(energy.sum(), pos, create_graph=False)
         return -grad
 
-    def cleanup(self) -> None:
+    def clean_up(self) -> None:
         pass
 
 
@@ -174,19 +175,17 @@ class SyntheticManager(ModelManager):
 
 
 # --------------------------------------------------------------------------- #
-# Real ML potential mirror: torch_geometric SchNet
+# Representative ML potential: torch_geometric SchNet
 # --------------------------------------------------------------------------- #
 class BenchSchNet(nn.Module):
-    """The actual SchNet backbone used by the ML repo, standalone for benching.
+    """A representative SchNet backbone, standalone for benching.
 
-    ``SchNetImplicitSolvent`` / ``ISSNet`` in the ML repo are both
-    ``torch_geometric.nn.models.SchNet`` (a variant, for ISSNet) plus an autograd
-    ``get_forces``. We reproduce exactly that here -- minus the Amber vacuum prior,
-    which is CPU/OpenMM work and a confound for a *GPU* duty-cycle measurement.
+    A typical implicit-solvent ML potential is ``torch_geometric.nn.models.SchNet``
+    plus an autograd ``get_forces``.
 
     The forward signature ``(z, pos, batch)`` matches the keys ``curate_batch``
     emits, so the base ``ModelManager.model_forward`` (``model(**input)`` +
-    ``get_forces``) drives it unchanged -- the same path the real model takes.
+    ``get_forces``) drives it unchanged -- the same path a real model takes.
     """
 
     def __init__(
@@ -215,16 +214,15 @@ class BenchSchNet(nn.Module):
         (grad,) = torch.autograd.grad(energy.sum(), pos, create_graph=False)
         return -grad
 
-    def cleanup(self) -> None:
+    def clean_up(self) -> None:
         pass
 
 
 class SchNetManager(ModelManager):
     """ModelManager for BenchSchNet: emits the (z, pos, batch) SchNet expects.
 
-    Mirrors the ML repo's ``VacuumBatchProcessor`` curation, minus its unit
-    conversions (irrelevant to timing). Features are identical across systems,
-    so z is read once and tiled.
+    A minimal curation with no unit conversions (irrelevant to timing).
+    Features are identical across systems, so z is read once and tiled.
     """
 
     def curate_batch(self, atoms_list: List) -> dict[str, Tensor]:
@@ -245,8 +243,8 @@ class SchNetManager(ModelManager):
 # --------------------------------------------------------------------------- #
 # Setup helpers
 # --------------------------------------------------------------------------- #
-# Model-specific defaults for knobs left unset on the CLI. schnet mirrors the
-# ML repo's ISSNet config; synthetic keeps a larger MLP so it stays GPU-bound.
+# Model-specific defaults for knobs left unset on the CLI. schnet uses a typical
+# implicit-solvent config; synthetic keeps a larger MLP so it stays GPU-bound.
 _MODEL_DEFAULTS = {
     "schnet": {"hidden": 32, "n_layers": 3, "n_gaussians": 32},
     "synthetic": {"hidden": 512, "n_layers": 4, "n_gaussians": 50},
@@ -287,8 +285,9 @@ def build_synthetic(args, device: str) -> tuple[_MM, Path, tempfile.TemporaryDir
 def build_schnet(args, device: str) -> tuple[_MM, Path, tempfile.TemporaryDirectory]:
     """The real SchNet backbone (torch_geometric) + a temp PDB.
 
-    To mirror the ISSNet config, pass ``--hidden 32 --n-layers 3 --n-gaussians 32``;
-    ``--hidden``/``--n-layers`` map to SchNet's ``hidden_channels``/``num_interactions``.
+    For a typical implicit-solvent config, pass
+    ``--hidden 32 --n-layers 3 --n-gaussians 32``; ``--hidden``/``--n-layers``
+    map to SchNet's ``hidden_channels``/``num_interactions``.
     """
     pdb_path, tmpdir = _template_pdb(args)
     model = BenchSchNet(
@@ -338,7 +337,7 @@ def main() -> None:
     # System size: atoms PER system (one molecule). Batch = n_systems * n_atoms.
     parser.add_argument("--n-atoms", type=int, default=60, help="atoms per system")
     # Model knobs (ignored when --manager-factory is given). Defaults are
-    # model-specific and filled in below: schnet uses the ISSNet config
+    # model-specific and filled in below: schnet uses a typical config
     # (hidden=32, n_layers=3, n_gaussians=32); synthetic uses a larger MLP.
     parser.add_argument("--hidden", type=int, default=None,
                         help="hidden width (schnet:32, synthetic:512)")
@@ -381,7 +380,7 @@ def main() -> None:
         mode = f"synthetic (hidden={args.hidden}, n_layers={args.n_layers})"
 
     multi = MultiAtoms(
-        pdb_path=pdb_path, model_manager=manager, n_systems=args.n_systems
+        template=pdb_path, model_manager=manager, n_systems=args.n_systems
     )
     n_atoms = len(multi.atoms[0])
 

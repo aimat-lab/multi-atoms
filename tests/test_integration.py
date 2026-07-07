@@ -8,12 +8,14 @@ from typing import List
 import numpy as np
 import pytest
 import torch
+from ase import Atoms
 from greenlet import greenlet
 from torch import Tensor
 
 from multiatoms.core import (
     BatchedAtoms,
     MultiAtomAttribute,
+    MultiAtoms,
 )
 from multiatoms.model_manager import (
     ModelManager,
@@ -55,7 +57,7 @@ class DummyModel:
         # Forces = -positions (restoring force toward origin)
         return -pos
 
-    def cleanup(self):
+    def clean_up(self):
         pass
 
 
@@ -278,6 +280,141 @@ class TestFullPipelineIntegration:
         for i in range(n_systems):
             expected = -initial_positions[i]
             np.testing.assert_allclose(collected_forces[i], expected, rtol=1e-5)
+
+    def test_get_potential_energy_parallel_matches_positions(self):
+        """Energy read in parallel mode reflects the system's current positions."""
+        model = DummyModel()
+        model_manager = DummyModelManager(model)
+        n_atoms = 2
+        scheduler = HubScheduler(model_manager)
+
+        positions = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+        atom = BatchedAtoms(
+            model_manager=model_manager,
+            scheduler=scheduler,
+            symbols=["H", "H"],
+            positions=positions,
+        )
+        atom.calc = ProxyCalculator(n_atoms=n_atoms)
+        atom._parallel_mode = True
+
+        energies = []
+
+        def worker():
+            energies.append(atom.get_potential_energy())
+
+        greenlets = [greenlet(worker)]
+        scheduler.set_greenlet_pool(greenlets)
+        scheduler.kick_off()
+
+        # DummyModel energy = sum(pos * 0.1) * 10 = sum(pos) = 1+2+...+6 = 21
+        assert energies[0] == pytest.approx(21.0)
+
+    def test_energy_after_forces_reuses_cache(self):
+        """Reading energy right after forces at the same positions adds no forward."""
+        model = DummyModel()
+        model_manager = DummyModelManager(model)
+        n_atoms = 2
+        scheduler = HubScheduler(model_manager)
+
+        atom = BatchedAtoms(
+            model_manager=model_manager,
+            scheduler=scheduler,
+            symbols=["H", "H"],
+            positions=np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]),
+        )
+        atom.calc = ProxyCalculator(n_atoms=n_atoms)
+        atom._parallel_mode = True
+
+        def worker():
+            atom.get_forces()
+            atom.get_potential_energy()  # same positions -> cache hit
+
+        greenlets = [greenlet(worker)]
+        scheduler.set_greenlet_pool(greenlets)
+        scheduler.kick_off()
+
+        assert model.forward_count == 1
+
+    def test_heterogeneous_completion_no_stale_forces(self):
+        """Systems that finish at different times must never read stale forces.
+
+        Regression test for the scheduler round-boundary bug: when the last
+        greenlet in the pool finishes mid-round, the systems that already
+        yielded that round used to resume with forces from the *previous*
+        round. With forces = -positions, any force read that does not match the
+        system's current positions is a stale read -> we catch it directly.
+
+        The trailing greenlet is given the *fewest* evaluations so it dies at
+        the wrap position, which is exactly the condition that triggered the bug.
+        """
+        model = DummyModel()
+        model_manager = DummyModelManager(model)
+        n_atoms = 2
+        scheduler = HubScheduler(model_manager)
+
+        def build(seed):
+            rng = np.random.default_rng(seed)
+            atom = BatchedAtoms(
+                model_manager=model_manager,
+                scheduler=scheduler,
+                symbols=["H", "H"],
+                positions=rng.uniform(0.0, 3.0, size=(n_atoms, 3)),
+            )
+            atom.calc = ProxyCalculator(n_atoms=n_atoms)
+            atom._parallel_mode = True
+            return atom
+
+        # (atom, n_force_evals) — earlier system runs longer, trailing one dies first.
+        specs = [(build(0), 3), (build(1), 2)]
+        violations = []
+
+        def make_worker(atom, n_evals, idx):
+            def worker():
+                for step in range(n_evals):
+                    forces = atom.get_forces()
+                    if not np.allclose(forces, -atom.get_positions(), atol=1e-4):
+                        violations.append((idx, step))
+                    atom.set_positions(atom.get_positions() + 0.05 * forces)
+
+            return worker
+
+        greenlets = [
+            greenlet(make_worker(atom, n, i)) for i, (atom, n) in enumerate(specs)
+        ]
+        scheduler.set_greenlet_pool(greenlets)
+        scheduler.kick_off()
+
+        assert violations == [], f"systems read stale forces at {violations}"
+
+
+class TestMultiAtomsConstruction:
+    """MultiAtoms must replicate the template's full state into every system."""
+
+    def test_preserves_cell_and_pbc_from_atoms(self):
+        """Cell and PBC from a template Atoms are copied into each system."""
+        model_manager = DummyModelManager(DummyModel())
+        template = Atoms("H2", positions=[[0.0, 0.0, 0.0], [0.74, 0.0, 0.0]])
+        template.set_cell([12.0, 13.0, 14.0])
+        template.set_pbc(True)
+
+        multi = MultiAtoms(template=template, model_manager=model_manager, n_systems=3)
+
+        assert len(multi.atoms) == 3
+        for system in multi.atoms:
+            np.testing.assert_allclose(system.cell.lengths(), [12.0, 13.0, 14.0])
+            assert bool(system.pbc.all())
+
+    def test_systems_are_independent_copies(self):
+        """Mutating one system must not affect the others or the template."""
+        model_manager = DummyModelManager(DummyModel())
+        template = Atoms("H2", positions=[[0.0, 0.0, 0.0], [0.74, 0.0, 0.0]])
+
+        multi = MultiAtoms(template=template, model_manager=model_manager, n_systems=2)
+        multi.atoms[0].positions[0, 0] = 5.0
+
+        assert multi.atoms[1].positions[0, 0] == 0.0
+        assert template.positions[0, 0] == 0.0
 
 
 class TestMultiAtomAttribute:

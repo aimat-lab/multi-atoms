@@ -199,27 +199,11 @@ class ModelManager(ABC):
         for i, atom in enumerate(atoms_list):
             atom.calc.set_results(forces, energy, atom_index=i)
 
-    def cleanup(self) -> None:
+    def clean_up(self) -> None:
         """Clean up model resources.
 
-        Override if your model needs cleanup (e.g., multiprocessing workers).
-        Default: calls model.cleanup() if it exists.
+        Override if your model needs teardown (e.g., multiprocessing workers).
+        Default: calls the model's ``clean_up()`` if it has one.
         """
-        if hasattr(self.model, "cleanup"):
-            self.model.cleanup()
-
-
-class PolyAtomModelManagerDecorator(ModelManager):
-    def __init__(self, base_model_manager: ModelManager):
-        # Use object.__setattr__ to avoid triggering __getattribute__ during init
-        object.__setattr__(self, "_base_model_manager", base_model_manager)
-
-    def __getattribute__(self, name):
-        # Delegate everything else to the wrapped model manager
-        base = object.__getattribute__(self, "_base_model_manager")
-        return getattr(base, name)
-
-    def curate_batch(self, atoms_list):
-        raise NotImplementedError(
-            "This should never be called, it merely exists to satisfy the ABC."
-        )
+        if hasattr(self.model, "clean_up"):
+            self.model.clean_up()
