@@ -207,19 +207,3 @@ class ModelManager(ABC):
         """
         if hasattr(self.model, "clean_up"):
             self.model.clean_up()
-
-
-class PolyAtomModelManagerDecorator(ModelManager):
-    def __init__(self, base_model_manager: ModelManager):
-        # Use object.__setattr__ to avoid triggering __getattribute__ during init
-        object.__setattr__(self, "_base_model_manager", base_model_manager)
-
-    def __getattribute__(self, name):
-        # Delegate everything else to the wrapped model manager
-        base = object.__getattribute__(self, "_base_model_manager")
-        return getattr(base, name)
-
-    def curate_batch(self, atoms_list):
-        raise NotImplementedError(
-            "This should never be called, it merely exists to satisfy the ABC."
-        )
