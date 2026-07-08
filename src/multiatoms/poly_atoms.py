@@ -137,11 +137,17 @@ class PolyAtoms:
     """Run ``workers`` parallel ``MultiAtoms`` simulations sharing one GPU.
 
     Args:
-        pdb_path: Template structure (same for every worker).
+        pdb_path: Template structure. A single path is used by every worker; a
+            list of length ``workers`` gives each worker its own template, so
+            different workers can simulate different systems on one shared GPU.
         model_manager: A live ``ModelManager`` on the GPU; stays in the main
             process and serves all workers. Owned by ``PolyAtoms`` -- its
-            ``clean_up()`` runs on context-manager exit.
-        n_systems: Systems per worker.
+            ``clean_up()`` runs on context-manager exit. It must handle every
+            worker's system (ML potentials are general over molecules).
+        n_systems: Systems per worker. A single int applies to every worker; a
+            list of length ``workers`` sets each worker's count independently --
+            size it so each worker's batched forward costs comparable GPU time
+            (bigger systems -> fewer replicas).
         workers: Number of worker processes K. ``None`` runs a single in-main
             ``MultiAtoms`` (no IPC, no overlap); ``1`` uses the real pool with
             one worker (useful to measure IPC overhead).
@@ -149,16 +155,15 @@ class PolyAtoms:
 
     def __init__(
         self,
-        pdb_path: Path | str,
+        pdb_path: Path | str | List[Path | str],
         model_manager: ModelManager,
-        n_systems: int = 1,
+        n_systems: int | List[int] = 1,
         workers: Optional[int] = 2,
     ):
-        self._pdb_path = str(pdb_path)
+        self._pdb_path = pdb_path
         self._model_manager = model_manager
         self._n_systems = n_systems
         self._workers = workers
-        self._template = None
 
     def __enter__(self) -> "PolyAtoms":
         return self
@@ -166,6 +171,17 @@ class PolyAtoms:
     def __exit__(self, *exc) -> bool:
         self._model_manager.clean_up()
         return False
+
+    @staticmethod
+    def _per_worker(value, k, what):
+        """Broadcast a scalar to ``k`` workers, or check a per-worker list length."""
+        if isinstance(value, (list, tuple)):
+            if len(value) != k:
+                raise ValueError(
+                    f"need one {what} per worker; got {len(value)} for {k} workers"
+                )
+            return list(value)
+        return [value] * k
 
     def run(
         self,
@@ -182,9 +198,9 @@ class PolyAtoms:
         """
         if self._workers is None:
             multi = MultiAtoms(
-                template=self._pdb_path,
+                template=self._per_worker(self._pdb_path, 1, "template")[0],
                 model_manager=self._model_manager,
-                n_systems=self._n_systems,
+                n_systems=self._per_worker(self._n_systems, 1, "n_systems")[0],
             )
             return [fn(multi, 0)]
 
@@ -196,20 +212,25 @@ class PolyAtoms:
                 f"need one seed per worker; got {len(seeds)} for {k} workers"
             )
 
+        templates = self._per_worker(self._pdb_path, k, "template")
+        n_systems = self._per_worker(self._n_systems, k, "n_systems")
+
         ctx = mp.get_context("spawn")
         req_q = ctx.Queue()
         res_qs = [ctx.Queue() for _ in range(k)]
 
-        if self._template is None:
-            self._template = ase.io.read(self._pdb_path)
-        # Reusable per-system atoms (cell/pbc/numbers intact); only positions
-        # change per request, so reconstruction is cheap.
-        views = [self._template.copy() for _ in range(self._n_systems)]
+        # One reusable atoms list per worker (cell/pbc/numbers intact); the
+        # server overwrites only positions per request, so each worker is
+        # curated against its own template even when the workers differ.
+        loaded = [ase.io.read(t) for t in templates]
+        views_per_worker = [
+            [loaded[w].copy() for _ in range(n_systems[w])] for w in range(k)
+        ]
 
         procs = [
             ctx.Process(
                 target=_worker_main,
-                args=(i, self._pdb_path, self._n_systems, fn, seeds[i], req_q,
+                args=(i, templates[i], n_systems[i], fn, seeds[i], req_q,
                       res_qs[i]),
             )
             for i in range(k)
@@ -219,7 +240,7 @@ class PolyAtoms:
 
         results: List[Any] = [None] * k
         try:
-            self._serve(k, req_q, res_qs, views, results, procs)
+            self._serve(k, req_q, res_qs, views_per_worker, results, procs)
         finally:
             # A hard death aborts the run with survivors still blocked on a
             # force reply; terminate them so nothing is left orphaned.
@@ -232,7 +253,7 @@ class PolyAtoms:
         self._raise_on_worker_error(results)
         return results
 
-    def _serve(self, k, req_q, res_qs, views, results, procs) -> None:
+    def _serve(self, k, req_q, res_qs, views_per_worker, results, procs) -> None:
         """Main-process server loop: answer force requests until all K workers done.
 
         Waits on the request queue with a timeout so a worker that dies hard
@@ -267,7 +288,9 @@ class PolyAtoms:
                 remaining -= 1
                 continue
 
-            # kind == _KIND_FORCES: payload is positions (m, n_atoms, 3)
+            # kind == _KIND_FORCES: payload is positions (m, n_atoms, 3), curated
+            # against this worker's own template (workers may differ in system).
+            views = views_per_worker[worker_id]
             m = payload.shape[0]
             for i in range(m):
                 views[i].set_positions(payload[i])

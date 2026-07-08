@@ -116,6 +116,59 @@ def test_seed_count_mismatch_raises(template_pdb):
             poly.run(simulate, seeds=[0])
 
 
+def test_heterogeneous_templates_and_n_systems():
+    """Different template AND different n_systems per worker on one server.
+
+    Worker 0 gets 3 systems of 4 atoms; worker 1 gets 2 systems of 6 atoms.
+    The differing atom counts would crash a single shared ``views`` list
+    (``set_positions`` shape mismatch), so passing proves the server curates
+    each worker against its own template.
+    """
+    tpl4 = str(_write_template(4))
+    tpl6 = str(_write_template(6))
+    with PolyAtoms(
+        [tpl4, tpl6], _make_manager(), n_systems=[3, 2], workers=2
+    ) as poly:
+        results = poly.run(simulate, seeds=[0, 1])
+    assert len(results) == 2
+    assert [p.shape for p in results[0]] == [(4, 3)] * 3
+    assert [p.shape for p in results[1]] == [(6, 3)] * 2
+    assert np.isfinite(np.concatenate(results[0] + results[1])).all()
+
+
+def test_heterogeneous_worker_matches_homogeneous():
+    """A worker's trajectory is independent of what the other worker simulates.
+
+    Worker 0 (template A) inside a heterogeneous [A, B] pool must reproduce the
+    same bit-for-bit trajectory as the same worker run alone -- proving the
+    server serves each worker from its own template with no cross-talk.
+    """
+    tpl_a = str(_write_template(4))
+    tpl_b = str(_write_template(6))
+    with PolyAtoms(
+        [tpl_a, tpl_b], _make_manager(), n_systems=[2, 3], workers=2
+    ) as poly:
+        hetero = poly.run(simulate, seeds=[0, 1])
+    with PolyAtoms(tpl_a, _make_manager(), n_systems=2, workers=1) as poly:
+        ref = poly.run(simulate, seeds=[0])[0]
+    for a, b in zip(hetero[0], ref):
+        np.testing.assert_allclose(a, b, rtol=1e-5, atol=1e-6)
+
+
+def test_template_count_mismatch_raises():
+    tpl_a = str(_write_template(4))
+    with PolyAtoms([tpl_a], _make_manager(), n_systems=2, workers=2) as poly:
+        with pytest.raises(ValueError, match="one template per worker"):
+            poly.run(simulate, seeds=[0, 1])
+
+
+def test_n_systems_count_mismatch_raises(template_pdb):
+    mgr = _make_manager()
+    with PolyAtoms(template_pdb, mgr, n_systems=[2, 3, 4], workers=2) as poly:
+        with pytest.raises(ValueError, match="one n_systems per worker"):
+            poly.run(simulate, seeds=[0, 1])
+
+
 def hard_crash(multi: MultiAtoms, worker_id: int) -> list:
     """Top-level so spawn can pickle it. Dies hard without sending _KIND_DONE."""
     import os
