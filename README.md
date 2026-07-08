@@ -16,6 +16,14 @@ ML potentials are fast per atom but small systems underfill the GPU. Stepping
 `N` copies in lockstep and batching their force evaluations turns `N` tiny
 forward passes into one big one, which is where the throughput comes from.
 
+![MD throughput scaling on an A100](docs/throughput_scaling.png)
+
+*MD throughput on one A100 (SchNet, alanine dipeptide). multiatoms takes raw ASE
+from 8.3 → 267 ns/day single-process (32×), and the PolyAtoms worker pool reaches
+~423 ns/day (51×) — within ~12% of [mlcg](https://github.com/ClementiGroup/mlcg),
+a fully GPU-native code, while every simulation stays a standard ASE object driven
+by a standard ASE integrator.*
+
 ## Install
 
 With [pixi](https://pixi.sh) (recommended for development):
@@ -49,6 +57,7 @@ Runtime dependencies: `ase`, `numpy`, `greenlet`, `torch`.
 | `BatchedAtoms` | An ASE `Atoms` subclass whose `get_forces()` yields to the scheduler in parallel. |
 | `ModelManager` | Abstract base you subclass to turn a batch of systems into model inputs/outputs.  |
 | `HubScheduler` | Trampoline (star-topology) greenlet scheduler; O(1) stack depth regardless of N.  |
+| `PolyAtoms`    | Runs `workers` `MultiAtoms` in separate processes sharing one GPU force server.   |
 
 ## Usage
 
@@ -136,6 +145,39 @@ to `curate_batch` are in Å.
 - Only call code that triggers `get_forces()` (i.e. integrator steps) inside
   `parallel()`. Set-up like attaching integrators or loggers should happen
   outside it.
+
+### `PolyAtoms`: sharing one GPU across processes
+
+A single `MultiAtoms` run alternates between the GPU (one batched forward) and the
+CPU (every integrator steps), so the GPU sits idle a good fraction of the time.
+`PolyAtoms` reclaims it: it runs `workers` independent `MultiAtoms` simulations in
+separate processes that ship their force requests to one shared GPU server in the
+main process. While one worker integrates on the CPU, the GPU serves another's
+batch (~1.8× throughput on one A100 with `workers=2`).
+
+```python
+from multiatoms import PolyAtoms
+
+def simulate(multi, worker_id):          # top-level so `spawn` can pickle it
+    integrators = multi.map(lambda a: SmartLangevin(a, ...), multi.atoms)
+    with multi.parallel():
+        multi.foreach(lambda i: i.run(1000), integrators)
+    return multi.get_positions()
+
+if __name__ == "__main__":               # required for spawn
+    with PolyAtoms("system.pdb", manager, n_systems=64, workers=2) as poly:
+        results = poly.run(simulate, seeds=[0, 1])   # one result per worker
+```
+
+The template and `n_systems` also accept a per-worker list, so different systems
+can share the same GPU server — size each worker's count so its batched forward
+costs comparable GPU time (bigger systems → fewer replicas):
+
+```python
+with PolyAtoms(["ligand_a.pdb", "ligand_b.pdb"], manager,
+               n_systems=[64, 32], workers=2) as poly:
+    results = poly.run(simulate, seeds=[0, 1])
+```
 
 ### Running many parallel integrators (file-descriptor fix)
 
