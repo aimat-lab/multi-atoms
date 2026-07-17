@@ -18,7 +18,7 @@ forward passes into one big one, which is where the throughput comes from.
 
 ![MD throughput scaling on an A100](docs/throughput_scaling.png)
 
-*MD throughput on one A100 (SchNet, alanine dipeptide). multiatoms takes raw ASE
+*MD throughput on one A100 (SchNet, alanine dipeptide, no solvent). multiatoms takes raw ASE
 from 8.3 → 267 ns/day single-process (32×), and the PolyAtoms worker pool reaches
 ~423 ns/day (51×) — within ~12% of [mlcg](https://github.com/ClementiGroup/mlcg),
 a fully GPU-native code, while every simulation stays a standard ASE object driven
