@@ -74,6 +74,24 @@ class ModelManager(ABC):
         - distribute_results(): Standard result distribution to ProxyCalculators
 
     See module docstring for a complete implementation example.
+
+    Contract
+    --------
+    Results are handed back to each system by fixed-stride slicing of the flat
+    force array, so three things must hold. None of them is checked, and
+    violating any of them yields wrong forces rather than an error:
+
+    * **Uniform systems.** Every system in one ``MultiAtoms`` has the same atom
+      count and ordering (guaranteed by construction -- they all come from one
+      template), and ``ProxyCalculator`` fixes that count when it is created.
+      Changing a system's atom count afterwards misaligns every later slice.
+    * **System-major forces.** ``model_forward`` must return forces grouped by
+      system, in the order ``curate_batch`` received them. A manager that
+      regroups atoms -- by element, say -- looks correct and mis-assigns every
+      force.
+    * **Variable-length batches.** ``curate_batch`` is called with only the
+      systems whose positions changed, so the count varies from step to step and
+      is not ``n_systems``. Derive it from ``len(atoms_list)``.
     """
 
     def __init__(self, model: torch.nn.Module, device: str):
@@ -138,24 +156,37 @@ class ModelManager(ABC):
         """Convert atoms list to batched model input tensors.
 
         Args:
-            atoms_list: List of BatchedAtoms to process
+            atoms_list: The systems needing new forces -- only those whose
+                positions changed since the last batch, so its length varies
+                from step to step and is generally *not* ``n_systems``. Never
+                assume a fixed count; take it from ``len(atoms_list)``.
 
         Returns:
-            Dict of tensors ready for the model (e.g., {"pos": ..., "batch_idx": ...})
+            Whatever your ``model_forward`` consumes. The annotation reflects the
+            default ``model_forward``, which unpacks a dict as keyword arguments;
+            the value is otherwise opaque to the framework and is passed straight
+            through, so an override is free to return a ``Batch`` or any other
+            object its model accepts.
         """
         pass
 
     def model_forward(self, batched_input: dict[str, Tensor]) -> tuple[Tensor, Tensor]:
         """Execute model forward pass and compute forces.
 
-        Default implementation assumes model returns energy and has get_forces method.
-        Override if your model has a different interface.
+        The default implementation makes three assumptions, and most real MLIPs
+        satisfy none of them -- override it unless yours does. It requires that
+        ``curate_batch`` returned a dict, that the dict holds a key literally
+        named ``"pos"`` carrying the positions to differentiate, and that the
+        model exposes ``get_forces(energy, pos)``.
 
         Args:
             batched_input: Output from curate_batch()
 
         Returns:
-            Tuple of (energy_tensor, forces_tensor)
+            Tuple of (energy_tensor, forces_tensor). Forces must be grouped by
+            system in the order ``curate_batch`` received them -- results are
+            distributed by fixed-stride slicing, which cannot detect any other
+            layout.
         """
         batched_input["pos"].requires_grad_(True)
         with torch.set_grad_enabled(True):
