@@ -42,9 +42,9 @@ Implementing a custom ModelManager for a graph neural network model:
         def post_process_hook(
             self, forces: np.ndarray, energy: np.ndarray
         ) -> tuple[np.ndarray, np.ndarray]:
-            '''Convert from eV to kcal/mol.'''
-            EV_TO_KCAL = 23.0609
-            return forces * EV_TO_KCAL, energy * EV_TO_KCAL
+            '''Convert the model's kcal/mol output to the eV that ASE expects.'''
+            KCAL_TO_EV = 1 / 23.0609
+            return forces * KCAL_TO_EV, energy * KCAL_TO_EV
 """
 
 from __future__ import annotations
@@ -68,7 +68,7 @@ class ModelManager(ABC):
 
     Users can optionally override:
         - post_process_hook(): Modify forces/energy before distribution (e.g., scaling)
-        - run_model(): Change how the model is called (default: model + get_forces)
+        - model_forward(): Change how the model is called (default: model + get_forces)
 
     The base class provides:
         - distribute_results(): Standard result distribution to ProxyCalculators
@@ -194,7 +194,6 @@ class ModelManager(ABC):
             atoms_list: List of atoms to receive results
             forces: Full forces array (n_systems * n_atoms, 3)
             energy: Full energy array (n_systems,)
-            n_atoms: Number of atoms per system
         """
         for i, atom in enumerate(atoms_list):
             atom.calc.set_results(forces, energy, atom_index=i)

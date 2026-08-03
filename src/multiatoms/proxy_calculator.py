@@ -33,7 +33,6 @@ class ProxyCalculator(Calculator):
             forces: Reference to the full forces array (n_systems * n_atoms, 3)
             energy: Reference to the full energy array (n_systems,)
             atom_index: Index of this atom in the batch
-            n_atoms: Number of atoms per system
         """
         self._forces = forces
         self._energy = energy
