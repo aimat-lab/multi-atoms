@@ -1,4 +1,6 @@
-# multiatoms
+<p align="center">
+  <img src="docs/logo.png" alt="multiatoms" width="420">
+</p>
 
 Parallel, GPU-batched molecular dynamics on top of [ASE](https://wiki.fysik.dtu.dk/ase/) `Atoms`.
 
