@@ -45,7 +45,7 @@ transparently batched on the shared GPU::
         return multi.get_positions()
 
     if __name__ == "__main__":                  # required for spawn
-        with PolyAtoms(pdb_path, manager, n_systems=256, workers=2) as poly:
+        with PolyAtoms(template, manager, n_systems=256, workers=2) as poly:
             results = poly.run(simulate, seeds=[0, 1])   # list of 2 results
 
 NOTE: build the GPU model/manager under ``if __name__ == "__main__"`` so the
@@ -62,6 +62,7 @@ from typing import Any, Callable, List, Optional
 
 import ase.io
 import numpy as np
+from ase import Atoms
 
 from multiatoms.core import MultiAtoms
 from multiatoms.model_manager import ModelManager
@@ -121,7 +122,7 @@ class RemoteModelManager(ModelManager):
         pass
 
 
-def _worker_main(worker_id, pdb_path, n_systems, fn, seed, req_q, res_q) -> None:
+def _worker_main(worker_id, template, n_systems, fn, seed, req_q, res_q) -> None:
     """Entry point for a worker process: build a local MultiAtoms and run ``fn``."""
     import torch
 
@@ -132,7 +133,7 @@ def _worker_main(worker_id, pdb_path, n_systems, fn, seed, req_q, res_q) -> None
     try:
         manager = RemoteModelManager(req_q, res_q, worker_id)
         multi = MultiAtoms(
-            template=pdb_path, model_manager=manager, n_systems=n_systems
+            template=template, model_manager=manager, n_systems=n_systems
         )
         result = fn(multi, worker_id)
     except Exception:
@@ -145,9 +146,11 @@ class PolyAtoms:
     """Run ``workers`` parallel ``MultiAtoms`` simulations sharing one GPU.
 
     Args:
-        pdb_path: Template structure. A single path is used by every worker; a
-            list of length ``workers`` gives each worker its own template, so
-            different workers can simulate different systems on one shared GPU.
+        template: The system to replicate, as an ASE ``Atoms`` or a path to any
+            ASE-readable structure file -- the same accepted forms as
+            ``MultiAtoms``. A single value is used by every worker; a list of
+            length ``workers`` gives each worker its own template, so different
+            workers can simulate different systems on one shared GPU.
         model_manager: A live ``ModelManager`` on the GPU; stays in the main
             process and serves all workers. Owned by ``PolyAtoms`` -- its
             ``clean_up()`` runs on context-manager exit. It must handle every
@@ -163,12 +166,12 @@ class PolyAtoms:
 
     def __init__(
         self,
-        pdb_path: Path | str | List[Path | str],
+        template: Atoms | Path | str | List[Atoms | Path | str],
         model_manager: ModelManager,
         n_systems: int | List[int] = 1,
         workers: Optional[int] = 2,
     ):
-        self._pdb_path = pdb_path
+        self._template = template
         self._model_manager = model_manager
         self._n_systems = n_systems
         self._workers = workers
@@ -206,7 +209,7 @@ class PolyAtoms:
         """
         if self._workers is None:
             multi = MultiAtoms(
-                template=self._per_worker(self._pdb_path, 1, "template")[0],
+                template=self._per_worker(self._template, 1, "template")[0],
                 model_manager=self._model_manager,
                 n_systems=self._per_worker(self._n_systems, 1, "n_systems")[0],
             )
@@ -220,7 +223,7 @@ class PolyAtoms:
                 f"need one seed per worker; got {len(seeds)} for {k} workers"
             )
 
-        templates = self._per_worker(self._pdb_path, k, "template")
+        templates = self._per_worker(self._template, k, "template")
         n_systems = self._per_worker(self._n_systems, k, "n_systems")
 
         ctx = mp.get_context("spawn")
@@ -230,7 +233,9 @@ class PolyAtoms:
         # One reusable atoms list per worker (cell/pbc/numbers intact); the
         # server overwrites only positions per request, so each worker is
         # curated against its own template even when the workers differ.
-        loaded = [ase.io.read(t) for t in templates]
+        # Accepts the same forms as MultiAtoms; an Atoms is used as-is (never
+        # mutated here -- only the per-system copies below are written to).
+        loaded = [t if isinstance(t, Atoms) else ase.io.read(t) for t in templates]
         views_per_worker = [
             [loaded[w].copy() for _ in range(n_systems[w])] for w in range(k)
         ]

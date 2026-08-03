@@ -235,12 +235,13 @@ if __name__ == "__main__":               # required for spawn
         results = poly.run(simulate, seeds=[0, 1])   # one result per worker
 ```
 
-The template and `n_systems` also accept a per-worker list, so different systems
-can share the same GPU server — size each worker's count so its batched forward
-costs comparable GPU time (bigger systems → fewer replicas):
+`template` takes the same forms as `MultiAtoms` — an ASE `Atoms` object or a path
+to any ASE-readable file. Both it and `n_systems` also accept a per-worker list,
+so different systems can share the same GPU server; size each worker's count so
+its batched forward costs comparable GPU time (bigger systems → fewer replicas):
 
 ```python
-with PolyAtoms(["ligand_a.pdb", "ligand_b.pdb"], manager,
+with PolyAtoms(["ligand_a.pdb", ligand_b_atoms], manager,
                n_systems=[64, 32], workers=2) as poly:
     results = poly.run(simulate, seeds=[0, 1])
 ```
