@@ -6,8 +6,16 @@ the integrators step, the GPU is idle -- measured at ~45% of wall-clock for a
 SchNet potential. ``PolyAtoms`` reclaims that idle time: it runs ``workers``
 independent ``MultiAtoms`` simulations in separate processes, each shipping its
 force requests to one central GPU server. While worker A integrates on the CPU,
-the GPU is busy with worker B's batch. Benchmarked at ~1.8x throughput on one
-A100 with K=2.
+the GPU is busy with worker B's batch. Benchmarked at 267 -> 423 ns/day (~1.6x)
+on one A100 with K=2.
+
+Scope of the overlap: workers ship **positions**, and the server runs curation
+*and* the forward (``ModelManager.infer``). What overlaps is a worker's
+integrator stepping against the server's *(curate + forward)* -- graph building
+is **not** spread across processes. A manager whose ``curate_batch`` is expensive
+(models needing a prebuilt ``edge_index``, built per system in Python) makes the
+single server the bottleneck, and more workers will not help. The win requires a
+server dominated by the GPU forward.
 
 Design
 ------

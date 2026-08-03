@@ -16,6 +16,26 @@ ML potentials are fast per atom but small systems underfill the GPU. Stepping
 `N` copies in lockstep and batching their force evaluations turns `N` tiny
 forward passes into one big one, which is where the throughput comes from.
 
+What batching *cannot* collapse is anything your `curate_batch` does per system
+on the CPU — so how much you gain depends on where your model builds its graph:
+
+- **Built inside the forward**, from positions plus a `batch` vector (SchNet via
+  `torch_cluster.radius_graph`, and most models that take raw coordinates): the
+  graph for all `N` systems is built in one GPU call. Batching applies to the
+  whole step and the speedup is large — the figure above.
+- **Required as input** (MACE, NequIP and other models that expect a prebuilt
+  `edge_index` / cell shifts): the graph must exist before the model is called,
+  so it is built in your `curate_batch`. Written the obvious way — a Python loop
+  calling an ASE-style neighbour list once per system — that part stays serial
+  and caps the gain, no matter how well the forward batches. If per-step cost is
+  dominated by graph construction rather than the forward, expect a modest
+  speedup, not the one plotted above.
+
+In the second case the lever is your `curate_batch`, not multiatoms: build the
+radius graph once for the whole batch on the GPU where the model allows it, use
+a fast periodic neighbour builder (`vesin`, `matscipy`) where it does not, or
+reuse neighbour lists across steps with a skin buffer.
+
 ![MD throughput scaling on an A100](docs/throughput_scaling.png)
 
 *MD throughput on one A100 (SchNet, alanine dipeptide). multiatoms takes raw ASE
@@ -191,7 +211,15 @@ CPU (every integrator steps), so the GPU sits idle a good fraction of the time.
 `PolyAtoms` reclaims it: it runs `workers` independent `MultiAtoms` simulations in
 separate processes that ship their force requests to one shared GPU server in the
 main process. While one worker integrates on the CPU, the GPU serves another's
-batch (~1.8× throughput on one A100 with `workers=2`).
+batch (267 → 423 ns/day, ~1.6×, on one A100 with `workers=2`).
+
+Note what is and is not overlapped. Workers send **positions**; the server does
+curation *and* the forward. So `PolyAtoms` overlaps a worker's integrator stepping
+with the server's *(curate + forward)* — it does **not** spread graph building
+across processes. If your `curate_batch` is expensive (the "required as input"
+case above), the server serialises it for every worker and becomes the bottleneck,
+and adding workers will not help. It pays off when the server is dominated by the
+GPU forward, which is the regime the figure above was measured in.
 
 ```python
 from multiatoms import PolyAtoms
