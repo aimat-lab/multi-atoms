@@ -8,7 +8,10 @@ from typing import List
 import numpy as np
 import pytest
 import torch
-from ase import Atoms
+from ase import Atoms, units
+from ase.calculators.calculator import Calculator, all_changes
+from ase.constraints import Hookean
+from ase.md.verlet import VelocityVerlet
 from greenlet import greenlet
 from torch import Tensor
 
@@ -94,6 +97,24 @@ class DummyModelManager(ModelManager):
         energy = energy * self.energy_scale
         forces = forces * self.force_scale
         return forces, energy
+
+
+class ReferenceCalculator(Calculator):
+    """Stock ASE calculator with DummyModelManager's effective physics.
+
+    DummyModelManager scales positions by 0.1 during curation and results by 10
+    in post-processing, so the net force is exactly ``-positions``. That makes a
+    multiatoms run directly comparable against plain ASE.
+    """
+
+    implemented_properties = ["energy", "forces"]
+
+    def calculate(self, atoms=None, properties=("energy",), system_changes=all_changes):
+        super().calculate(atoms, properties, system_changes)
+        self.results = {
+            "energy": float(atoms.positions.sum()),
+            "forces": -atoms.positions.copy(),
+        }
 
 
 class TestBatchedAtomsIntegration:
@@ -415,6 +436,59 @@ class TestMultiAtomsConstruction:
 
         assert multi.atoms[1].positions[0, 0] == 0.0
         assert template.positions[0, 0] == 0.0
+
+
+class TestConstraints:
+    """Constraints copied from the template must behave exactly as in stock ASE.
+
+    ASE applies ``constraint.adjust_forces`` in place on whatever the calculator
+    returns, so handing out a view into the shared batch buffer would let an
+    additive constraint accumulate there across reads.
+    """
+
+    @staticmethod
+    def _restrained_template():
+        atoms = Atoms(
+            "H3", positions=[[0.0, 0.0, 0.0], [2.5, 0.0, 0.0], [0.0, 2.5, 0.0]]
+        )
+        atoms.set_constraint(Hookean(a1=0, a2=1, rt=1.0, k=2.0))
+        return atoms
+
+    def test_repeated_reads_do_not_reapply_constraint(self):
+        """Re-reading forces at unchanged positions must return the same values."""
+        model_manager = DummyModelManager(DummyModel())
+        atom = BatchedAtoms(
+            model_manager=model_manager,
+            scheduler=HubScheduler(model_manager),
+            template=self._restrained_template(),
+        )
+        atom.calc = ProxyCalculator(n_atoms=3)
+
+        # Copied on capture: if get_forces() ever hands back a view, comparing
+        # against a live reference would compare the buffer with itself.
+        first = np.array(atom.get_forces(), copy=True)
+        for _ in range(3):
+            np.testing.assert_allclose(atom.get_forces(), first)
+
+    def test_constrained_md_matches_plain_ase(self):
+        """A restrained run must follow the same trajectory as stock ASE."""
+        reference = self._restrained_template()
+        reference.calc = ReferenceCalculator()
+        VelocityVerlet(reference, timestep=0.5 * units.fs).run(10)
+
+        multi = MultiAtoms(
+            template=self._restrained_template(),
+            model_manager=DummyModelManager(DummyModel()),
+            n_systems=2,
+        )
+        integrators = multi.map(
+            lambda a: VelocityVerlet(a, timestep=0.5 * units.fs), multi.atoms
+        )
+        with multi.parallel():
+            multi.foreach(lambda i: i.run(10), integrators)
+
+        for system in multi.atoms:
+            np.testing.assert_allclose(system.positions, reference.positions, atol=1e-9)
 
 
 class TestMultiAtomAttribute:
