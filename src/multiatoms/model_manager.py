@@ -42,9 +42,9 @@ Implementing a custom ModelManager for a graph neural network model:
         def post_process_hook(
             self, forces: np.ndarray, energy: np.ndarray
         ) -> tuple[np.ndarray, np.ndarray]:
-            '''Convert from eV to kcal/mol.'''
-            EV_TO_KCAL = 23.0609
-            return forces * EV_TO_KCAL, energy * EV_TO_KCAL
+            '''Convert the model's kcal/mol output to the eV that ASE expects.'''
+            KCAL_TO_EV = 1 / 23.0609
+            return forces * KCAL_TO_EV, energy * KCAL_TO_EV
 """
 
 from __future__ import annotations
@@ -68,12 +68,31 @@ class ModelManager(ABC):
 
     Users can optionally override:
         - post_process_hook(): Modify forces/energy before distribution (e.g., scaling)
-        - run_model(): Change how the model is called (default: model + get_forces)
+        - model_forward(): Change how the model is called (default: model + get_forces)
 
     The base class provides:
+        - infer(): One batched inference (curation + forward + post-process)
         - distribute_results(): Standard result distribution to ProxyCalculators
 
     See module docstring for a complete implementation example.
+
+    Contract
+    --------
+    Results are handed back to each system by fixed-stride slicing of the flat
+    force array, so three things must hold. None of them is checked, and
+    violating any of them yields wrong forces rather than an error:
+
+    * **Uniform systems.** Every system in one ``MultiAtoms`` has the same atom
+      count and ordering (guaranteed by construction -- they all come from one
+      template), and ``ProxyCalculator`` fixes that count when it is created.
+      Changing a system's atom count afterwards misaligns every later slice.
+    * **System-major forces.** ``model_forward`` must return forces grouped by
+      system, in the order ``curate_batch`` received them. A manager that
+      regroups atoms -- by element, say -- looks correct and mis-assigns every
+      force.
+    * **Variable-length batches.** ``curate_batch`` is called with only the
+      systems whose positions changed, so the count varies from step to step and
+      is not ``n_systems``. Derive it from ``len(atoms_list)``.
     """
 
     def __init__(self, model: torch.nn.Module, device: str):
@@ -106,7 +125,7 @@ class ModelManager(ABC):
             return
 
         # 2. Run the model (curation + forward + post-process)
-        forces, energy = self._infer(atoms_to_compute)
+        forces, energy = self.infer(atoms_to_compute)
 
         # 3. Standard result distribution
         self.distribute_results(atoms_to_compute, forces, energy)
@@ -115,17 +134,26 @@ class ModelManager(ABC):
         for atom in atoms_to_compute:
             atom._cached_positions = atom.positions.copy()
 
-    def _infer(
+    def infer(
         self, atoms_to_compute: List["BatchedAtoms"]
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Run the model on the systems that need new forces -> ``(forces, energy)``.
+        """Run one batched inference -> ``(forces, energy)`` as numpy arrays.
 
-        Curation + forward + to-numpy + post-process, with no caching or result
-        distribution. Factored out so it can be shared by the local path
-        (``compute_energy_and_forces``) and the multi-process GPU force server
-        (``multiatoms.poly_atoms``): the server runs this on the systems a worker
-        shipped over and sends the arrays back, while ``RemoteModelManager``
-        overrides it to do the shipping.
+        Curation + forward + to-numpy + post-process, with no caching and no
+        result distribution. Public because it is the natural way to exercise a
+        manager on its own -- checking a batched forward against a stock
+        single-system calculator, for instance -- and because two callers inside
+        the package need it: ``compute_energy_and_forces`` on the local path, and
+        the GPU force server in ``multiatoms.poly_atoms``, which runs it on the
+        systems a worker shipped over. ``RemoteModelManager`` overrides it to do
+        the shipping instead.
+
+        Args:
+            atoms_to_compute: Systems to evaluate in a single batch.
+
+        Returns:
+            ``(forces, energy)`` with shapes ``(Σ atoms, 3)`` and ``(n_systems,)``
+            -- note the order, which is the reverse of ``model_forward``'s.
         """
         batched_input = self.curate_batch(atoms_to_compute)
         energy_raw, forces_raw = self.model_forward(batched_input)
@@ -138,24 +166,37 @@ class ModelManager(ABC):
         """Convert atoms list to batched model input tensors.
 
         Args:
-            atoms_list: List of BatchedAtoms to process
+            atoms_list: The systems needing new forces -- only those whose
+                positions changed since the last batch, so its length varies
+                from step to step and is generally *not* ``n_systems``. Never
+                assume a fixed count; take it from ``len(atoms_list)``.
 
         Returns:
-            Dict of tensors ready for the model (e.g., {"pos": ..., "batch_idx": ...})
+            Whatever your ``model_forward`` consumes. The annotation reflects the
+            default ``model_forward``, which unpacks a dict as keyword arguments;
+            the value is otherwise opaque to the framework and is passed straight
+            through, so an override is free to return a ``Batch`` or any other
+            object its model accepts.
         """
         pass
 
     def model_forward(self, batched_input: dict[str, Tensor]) -> tuple[Tensor, Tensor]:
         """Execute model forward pass and compute forces.
 
-        Default implementation assumes model returns energy and has get_forces method.
-        Override if your model has a different interface.
+        The default implementation makes three assumptions, and most real MLIPs
+        satisfy none of them -- override it unless yours does. It requires that
+        ``curate_batch`` returned a dict, that the dict holds a key literally
+        named ``"pos"`` carrying the positions to differentiate, and that the
+        model exposes ``get_forces(energy, pos)``.
 
         Args:
             batched_input: Output from curate_batch()
 
         Returns:
-            Tuple of (energy_tensor, forces_tensor)
+            Tuple of (energy_tensor, forces_tensor). Forces must be grouped by
+            system in the order ``curate_batch`` received them -- results are
+            distributed by fixed-stride slicing, which cannot detect any other
+            layout.
         """
         batched_input["pos"].requires_grad_(True)
         with torch.set_grad_enabled(True):
@@ -194,7 +235,6 @@ class ModelManager(ABC):
             atoms_list: List of atoms to receive results
             forces: Full forces array (n_systems * n_atoms, 3)
             energy: Full energy array (n_systems,)
-            n_atoms: Number of atoms per system
         """
         for i, atom in enumerate(atoms_list):
             atom.calc.set_results(forces, energy, atom_index=i)

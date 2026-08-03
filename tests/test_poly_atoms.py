@@ -15,6 +15,7 @@ import numpy as np
 import pytest
 import torch
 from ase import Atoms
+from ase.io import read as ase_read
 from ase.io import write as ase_write
 from ase.md.verlet import VelocityVerlet
 from torch import Tensor
@@ -108,6 +109,42 @@ def test_pool_matches_in_main(template_pdb):
         remote = poly.run(simulate, seeds=[0])[0]
     for a, b in zip(local, remote):
         np.testing.assert_allclose(a, b, rtol=1e-5, atol=1e-6)
+
+
+def test_atoms_template_matches_path_template(template_pdb):
+    """An in-memory Atoms template must be accepted and behave like a file path.
+
+    Covers both the in-main fast path and the real worker pool, since only the
+    latter goes through the server's template loading and pickles the Atoms to
+    a spawned process.
+    """
+    atoms_template = ase_read(template_pdb)
+
+    for workers, seeds in ((None, None), (1, [0])):
+        with PolyAtoms(
+            template_pdb, _make_manager(), n_systems=2, workers=workers
+        ) as p:
+            from_path = p.run(simulate, seeds=seeds)[0]
+        with PolyAtoms(
+            atoms_template, _make_manager(), n_systems=2, workers=workers
+        ) as p:
+            from_atoms = p.run(simulate, seeds=seeds)[0]
+        for a, b in zip(from_path, from_atoms):
+            np.testing.assert_allclose(a, b, rtol=1e-5, atol=1e-6)
+
+
+def test_atoms_template_keeps_cell_and_pbc():
+    """The server must curate against the template's cell, not a bare position set."""
+    template = Atoms("C4", positions=np.random.default_rng(1).uniform(0, 5, (4, 3)))
+    template.set_cell([11.0, 12.0, 13.0])
+    template.set_pbc(True)
+
+    with PolyAtoms(template, _make_manager(), n_systems=2, workers=1) as poly:
+        poly.run(simulate, seeds=[0])
+
+    # The caller's object must not have been mutated by the server's views.
+    np.testing.assert_allclose(template.cell.lengths(), [11.0, 12.0, 13.0])
+    assert bool(template.pbc.all())
 
 
 def test_seed_count_mismatch_raises(template_pdb):

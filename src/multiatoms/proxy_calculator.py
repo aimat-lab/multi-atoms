@@ -5,8 +5,9 @@ from ase.calculators.calculator import Calculator, all_changes
 class ProxyCalculator(Calculator):
     """ASE Calculator that receives references to result arrays from ModelManager.
 
-    Slices into shared force/energy arrays on access (zero-copy for single atom,
-    slice view for batched atoms).
+    Holds a reference to the batch's full force/energy arrays plus this system's
+    index into them, and slices out its own rows on access. See ``get_forces``
+    for why the slice is copied rather than returned as a view.
     """
 
     implemented_properties = ["energy", "forces"]
@@ -32,18 +33,26 @@ class ProxyCalculator(Calculator):
             forces: Reference to the full forces array (n_systems * n_atoms, 3)
             energy: Reference to the full energy array (n_systems,)
             atom_index: Index of this atom in the batch
-            n_atoms: Number of atoms per system
         """
         self._forces = forces
         self._energy = energy
         self._atom_index = atom_index
 
     def get_forces(self, atoms=None, **kwargs) -> np.ndarray:
-        """Return this atom's slice of the forces array."""
+        """Return this atom's slice of the forces array, as a copy.
+
+        The copy is load-bearing, not defensive: ASE's ``Atoms.get_forces``
+        applies ``constraint.adjust_forces(atoms, forces)`` **in place** on
+        whatever the calculator hands back. A view would let that write into
+        the shared batch buffer, and since the position cache serves repeated
+        reads at unchanged positions from the same array -- ASE's ``Dynamics``
+        re-reads forces several times per step -- an additive constraint
+        (``Hookean`` and friends) would accumulate on every read.
+        """
         if self._forces is None:
             raise RuntimeError("Forces not set. Call set_results first.")
         start = self._atom_index * self._n_atoms
-        return self._forces[start : start + self._n_atoms]
+        return self._forces[start : start + self._n_atoms].copy()
 
     def get_potential_energy(self, atoms=None, **kwargs) -> float:
         """Return this atom's energy.
