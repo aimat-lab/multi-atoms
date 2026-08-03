@@ -137,6 +137,19 @@ multi.clean_up()
 Forces and energies must come back in ASE units (eV / eV·Å⁻¹); positions handed
 to `curate_batch` are in Å.
 
+To exercise a manager on its own — checking a batched forward against a stock
+single-system calculator, say — call **`infer(atoms_list) -> (forces, energy)`**.
+It runs one batch through curation, forward and post-processing with no caching
+and no result distribution.
+
+The `device` you pass to `ModelManager` is stored and handed to your
+`curate_batch`; multiatoms never resolves, validates or acts on it, and never
+moves your model. Whether the run is actually on the GPU is therefore entirely
+determined by your own `device` string and your own `model.to(device)` — log it
+yourself if you want a record. (A `torch` build that does not match the driver
+makes `torch.cuda.is_available()` return `False` silently, and nothing in the
+stack warns about it.)
+
 Four rules are load-bearing. None is checked, and breaking any of them produces
 wrong forces rather than an error:
 

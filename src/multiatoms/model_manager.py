@@ -71,6 +71,7 @@ class ModelManager(ABC):
         - model_forward(): Change how the model is called (default: model + get_forces)
 
     The base class provides:
+        - infer(): One batched inference (curation + forward + post-process)
         - distribute_results(): Standard result distribution to ProxyCalculators
 
     See module docstring for a complete implementation example.
@@ -124,7 +125,7 @@ class ModelManager(ABC):
             return
 
         # 2. Run the model (curation + forward + post-process)
-        forces, energy = self._infer(atoms_to_compute)
+        forces, energy = self.infer(atoms_to_compute)
 
         # 3. Standard result distribution
         self.distribute_results(atoms_to_compute, forces, energy)
@@ -133,17 +134,26 @@ class ModelManager(ABC):
         for atom in atoms_to_compute:
             atom._cached_positions = atom.positions.copy()
 
-    def _infer(
+    def infer(
         self, atoms_to_compute: List["BatchedAtoms"]
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Run the model on the systems that need new forces -> ``(forces, energy)``.
+        """Run one batched inference -> ``(forces, energy)`` as numpy arrays.
 
-        Curation + forward + to-numpy + post-process, with no caching or result
-        distribution. Factored out so it can be shared by the local path
-        (``compute_energy_and_forces``) and the multi-process GPU force server
-        (``multiatoms.poly_atoms``): the server runs this on the systems a worker
-        shipped over and sends the arrays back, while ``RemoteModelManager``
-        overrides it to do the shipping.
+        Curation + forward + to-numpy + post-process, with no caching and no
+        result distribution. Public because it is the natural way to exercise a
+        manager on its own -- checking a batched forward against a stock
+        single-system calculator, for instance -- and because two callers inside
+        the package need it: ``compute_energy_and_forces`` on the local path, and
+        the GPU force server in ``multiatoms.poly_atoms``, which runs it on the
+        systems a worker shipped over. ``RemoteModelManager`` overrides it to do
+        the shipping instead.
+
+        Args:
+            atoms_to_compute: Systems to evaluate in a single batch.
+
+        Returns:
+            ``(forces, energy)`` with shapes ``(Σ atoms, 3)`` and ``(n_systems,)``
+            -- note the order, which is the reverse of ``model_forward``'s.
         """
         batched_input = self.curate_batch(atoms_to_compute)
         energy_raw, forces_raw = self.model_forward(batched_input)

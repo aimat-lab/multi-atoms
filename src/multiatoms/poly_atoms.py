@@ -85,7 +85,7 @@ class _ServerError:
 class RemoteModelManager(ModelManager):
     """ModelManager that ships force requests to the GPU server in the main process.
 
-    Overrides only ``_infer`` -- the cache filter and result distribution in
+    Overrides only ``infer`` -- the cache filter and result distribution in
     ``compute_energy_and_forces`` are inherited unchanged, as are the scheduler,
     ``BatchedAtoms`` and ``ProxyCalculator`` that drive it.
     """
@@ -99,7 +99,7 @@ class RemoteModelManager(ModelManager):
     def curate_batch(self, atoms_list):  # pragma: no cover - server-side only
         raise NotImplementedError("Curation runs in the GPU server process.")
 
-    def _infer(self, atoms_to_compute) -> tuple[np.ndarray, np.ndarray]:
+    def infer(self, atoms_to_compute) -> tuple[np.ndarray, np.ndarray]:
         positions = np.ascontiguousarray(
             np.stack([a.positions for a in atoms_to_compute]), dtype=np.float32
         )
@@ -295,7 +295,7 @@ class PolyAtoms:
             for i in range(m):
                 views[i].set_positions(payload[i])
             try:
-                forces, energy = self._model_manager._infer(views[:m])
+                forces, energy = self._model_manager.infer(views[:m])
             except Exception:
                 res_qs[worker_id].put(_ServerError(traceback.format_exc()))
             else:
