@@ -26,12 +26,20 @@ by a standard ASE integrator.
 
 ![MD throughput scaling on an A100](docs/throughput_scaling.png)
 
+> [!TIP]
+> The near-linear rise at the left of the log-log plot is the GPU running
+> under-occupied: while capacity is spare, each added replica buys close to its
+> full throughput. The curve flattens where the GPU saturates.
+
 `MultiAtoms` runs many MD simulations at once and batches their model
 evaluations into a single forward pass. The simulations themselves are ordinary
 ASE `Atoms` objects driven by an ordinary ASE integrator (Langevin, Velocity
 Verlet, BFGS). A cooperative greenlet scheduler pauses each one when it needs
 forces; once they have all yielded, it collects the pending systems, runs one
-batched forward pass, and hands the results back.
+batched forward pass, and hands the results back. Nothing in that loop needs to
+be GPU-native. The interception happens at `get_forces()`, so any ASE driver
+that calls it is batched unchanged. A fully GPU-native engine reaches
+comparable throughput only by rewriting the dynamics itself.
 
 `PolyAtoms` extends this across processes. It runs several `MultiAtoms`
 instances at once, so while one is blocked on its batched forward, the others
