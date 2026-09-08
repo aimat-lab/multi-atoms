@@ -11,20 +11,20 @@
   </a>
 </p>
 
-Parallel, GPU-batched molecular dynamics on top of [ASE](https://wiki.fysik.dtu.dk/ase/).
+Parallel, GPU-batched molecular dynamics (MD) on top of [ASE](https://wiki.fysik.dtu.dk/ase/).
 
 ML potentials are fast per atom, but small systems underfill the GPU. Stepping
 `N` copies in lockstep and batching their force evaluations turns `N` tiny
 forward passes into one big one, which is where the throughput comes from.
 
-![MD throughput scaling on an A100](docs/throughput_scaling.png)
+The figure below shows where that lands. Throughput is measured on one A100 with
+a SchNet model, alanine dipeptide, no solvent. Raw ASE manages 8.3 ns/day.
+`MultiAtoms` takes that to 267 ns/day (32×), and `PolyAtoms` reaches ~423 ns/day
+(51×). That is within ~12% of [mlcg](https://github.com/ClementiGroup/mlcg), a
+fully GPU-native code, while every simulation stays a standard ASE object driven
+by a standard ASE integrator.
 
-> [!NOTE]
-> MD throughput on one A100 (SchNet, alanine dipeptide, no solvent). multiatoms
-> takes raw ASE from 8.3 → 267 ns/day single-process (32×), and the PolyAtoms
-> worker pool reaches ~423 ns/day (51×), within ~12% of
-> [mlcg](https://github.com/ClementiGroup/mlcg), a fully GPU-native code, while
-> every simulation stays a standard ASE object driven by a standard ASE integrator.
+![MD throughput scaling on an A100](docs/throughput_scaling.png)
 
 `MultiAtoms` runs many MD simulations at once and batches their model
 evaluations into a single forward pass. The simulations themselves are ordinary
