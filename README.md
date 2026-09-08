@@ -94,7 +94,7 @@ from ase import units
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
 
 from multiatoms import MultiAtoms, ModelManager
-from multiatoms.ase_md import NullLogger, SmartLangevin
+from multiatoms.ase_md import FdSafeLangevin, NullLogger
 
 
 class MyModelManager(ModelManager):
@@ -110,18 +110,6 @@ class MyModelManager(ModelManager):
         batch_idx = torch.arange(n_systems, device=self.device).repeat_interleave(n_atoms)
         return {"pos": pos, "batch_idx": batch_idx}
 
-    def model_forward(self, batched_input):
-        pos = batched_input["pos"]
-        pos.requires_grad_(True)
-        with torch.set_grad_enabled(True):
-            energy = self.model(pos, batched_input["batch_idx"])
-            forces = self.model.get_forces(energy, pos)
-        return energy, forces
-
-    # Optional: convert/scale units before results are distributed.
-    def post_process_hook(self, forces, energy):
-        return forces, energy
-
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 manager = MyModelManager(model=my_model.to(device).eval(), device=device)
@@ -133,8 +121,8 @@ multi = MultiAtoms(template="system.pdb", model_manager=manager, n_systems=64)
 # Per-system setup runs serially (no GPU calls here):
 multi.foreach(lambda a: MaxwellBoltzmannDistribution(a, temperature_K=300), multi.atoms)
 integrators = multi.map(
-    lambda a: SmartLangevin(a, timestep=1 * units.fs, temperature_K=300,
-                            friction=0.01 / units.fs, logfile=NullLogger()),
+    lambda a: FdSafeLangevin(a, timestep=1 * units.fs, temperature_K=300,
+                             friction=0.01 / units.fs, logfile=NullLogger()),
     multi.atoms,
 )
 
@@ -147,17 +135,35 @@ multi.clean_up()
 
 ### The `ModelManager` contract
 
-- **`curate_batch(atoms_list) -> dict[str, Tensor]`** *(required)* — build the
-  batched model input from the systems that need new forces.
+- **`curate_batch(atoms_list) -> Any`** *(required)* — build the batched model
+  input, in whatever form your `model_forward` consumes (a dict of tensors, a
+  PyG `Batch`, ...). `atoms_list` holds only the systems whose positions changed
+  since the last batch, so its length varies from step to step and is generally
+  not `n_systems` — take the count from `len(atoms_list)`.
 - **`model_forward(batched_input) -> (energy, forces)`** *(optional)* — defaults
-  to `model(**batched_input)` + `model.get_forces(energy, pos)`. Override for a
-  custom calling convention.
+  to `model(**batched_input)` + `model.get_forces(energy, pos)`, which assumes
+  your batch is a dict holding a key literally named `"pos"` and that the model
+  exposes `get_forces(energy, pos)`. Most real MLIPs match none of that, so
+  expect to override it.
 - **`post_process_hook(forces, energy) -> (forces, energy)`** *(optional)* — unit
   conversion / scaling before distribution. Defaults to identity.
 - **`clean_up()`** *(optional)* — defaults to calling `model.clean_up()` if present.
 
 Forces and energies must come back in ASE units (eV / eV·Å⁻¹); positions handed
 to `curate_batch` are in Å.
+
+Two rules are load-bearing. Neither is checked, and breaking either produces
+wrong forces rather than an error:
+
+- **`model_forward` must return forces in system-major order**, matching the
+  order `curate_batch` received the systems. Results are distributed by
+  fixed-stride slicing of the flat `(Σ atoms, 3)` array, which cannot detect any
+  other layout — a manager that regroups atoms by element looks correct and
+  mis-assigns every force.
+- **Every system has the same atom count and ordering.** That holds by
+  construction (all systems are copies of one template) and `ProxyCalculator`
+  fixes the count when it is built, so changing a system's atom count afterwards
+  misaligns every later slice.
 
 To exercise a manager on its own — checking a batched forward against a stock
 single-system calculator, say — call **`infer(atoms_list) -> (forces, energy)`**.
@@ -171,31 +177,6 @@ determined by your own `device` string and your own `model.to(device)` — log i
 yourself if you want a record. (A `torch` build that does not match the driver
 makes `torch.cuda.is_available()` return `False` silently, and nothing in the
 stack warns about it.)
-
-Four rules are load-bearing. None is checked, and breaking any of them produces
-wrong forces rather than an error:
-
-- **`curate_batch` receives a variable-length subset.** Only systems whose
-  positions changed since the last batch are passed, so the count differs from
-  step to step and is generally not `n_systems`. Take it from `len(atoms_list)`.
-- **`model_forward` must return forces in system-major order**, matching the
-  order `curate_batch` received the systems. Results are distributed by
-  fixed-stride slicing of the flat `(Σ atoms, 3)` array, which cannot detect any
-  other layout — a manager that regroups atoms by element looks correct and
-  mis-assigns every force.
-- **Every system has the same atom count and ordering.** That holds by
-  construction (all systems are copies of one template) and `ProxyCalculator`
-  fixes the count when it is built, so changing a system's atom count afterwards
-  misaligns every later slice.
-- **`curate_batch`'s return value is opaque to the framework.** It goes straight
-  to *your* `model_forward`, so the `dict[str, Tensor]` annotation describes what
-  the *default* `model_forward` consumes, not a requirement — an override may
-  return a PyG `Batch` or anything else its model accepts.
-
-The default `model_forward` additionally assumes your batch is a dict containing
-a key literally named `"pos"`, and that the model exposes
-`get_forces(energy, pos)`. Most real MLIPs match none of that, so expect to
-override it.
 
 ### `map` / `foreach` / `parallel()`
 
@@ -227,7 +208,7 @@ GPU forward, which is the regime the figure above was measured in.
 from multiatoms import PolyAtoms
 
 def simulate(multi, worker_id):          # top-level so `spawn` can pickle it
-    integrators = multi.map(lambda a: SmartLangevin(a, ...), multi.atoms)
+    integrators = multi.map(lambda a: FdSafeLangevin(a, ...), multi.atoms)
     with multi.parallel():
         multi.foreach(lambda i: i.run(1000), integrators)
     return multi.get_positions()
@@ -256,7 +237,7 @@ the process limit. The optional `multiatoms.ase_md` module fixes this:
 
 - `NullLogger` — a no-op stream; pass it as `logfile=` to any ASE
   integrator/optimizer (`Langevin`, `VelocityVerlet`, `BFGS`, ...).
-- `SmartLangevin` — a `Langevin` subclass that returns a `NullLogger` instead of
+- `FdSafeLangevin` — a `Langevin` subclass that returns a `NullLogger` instead of
   opening `/dev/null`, so the fix applies even when ASE forces `logfile=None`
   internally.
 

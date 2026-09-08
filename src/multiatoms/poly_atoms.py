@@ -39,7 +39,7 @@ transparently batched on the shared GPU::
     def simulate(multi, worker_id):
         multi.foreach(lambda a: MaxwellBoltzmannDistribution(a, temperature_K=300),
                       multi.atoms)
-        integrators = multi.map(lambda a: SmartLangevin(a, ...), multi.atoms)
+        integrators = multi.map(lambda a: FdSafeLangevin(a, ...), multi.atoms)
         with multi.parallel():
             multi.foreach(lambda i: i.run(1000), integrators)
         return multi.get_positions()
