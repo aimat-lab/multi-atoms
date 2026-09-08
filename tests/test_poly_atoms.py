@@ -163,9 +163,7 @@ def test_heterogeneous_templates_and_n_systems():
     """
     tpl4 = str(_write_template(4))
     tpl6 = str(_write_template(6))
-    with PolyAtoms(
-        [tpl4, tpl6], _make_manager(), n_systems=[3, 2], workers=2
-    ) as poly:
+    with PolyAtoms([tpl4, tpl6], _make_manager(), n_systems=[3, 2], workers=2) as poly:
         results = poly.run(simulate, seeds=[0, 1])
     assert len(results) == 2
     assert [p.shape for p in results[0]] == [(4, 3)] * 3

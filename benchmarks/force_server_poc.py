@@ -187,9 +187,7 @@ class _ServerError:
 # Shared simulation setup (used by baseline and workers -> identical workload)
 # --------------------------------------------------------------------------- #
 def setup_simulation(manager: ModelManager, pdb_path: str, n_systems: int, temp: float):
-    multi = MultiAtoms(
-        template=pdb_path, model_manager=manager, n_systems=n_systems
-    )
+    multi = MultiAtoms(template=pdb_path, model_manager=manager, n_systems=n_systems)
     multi.foreach(
         lambda a: MaxwellBoltzmannDistribution(a, temperature_K=temp), multi.atoms
     )
@@ -301,8 +299,17 @@ def baseline_main(spec, pdb_path, n_systems, n_steps, warmup, temp, out_q) -> No
 
 
 def worker_main(
-    worker_id, req_q, res_q, pdb_path, n_systems, n_steps, warmup, temp, ready_q,
-    done_q, start_evt,
+    worker_id,
+    req_q,
+    res_q,
+    pdb_path,
+    n_systems,
+    n_steps,
+    warmup,
+    temp,
+    ready_q,
+    done_q,
+    start_evt,
 ) -> None:
     torch.set_num_threads(1)  # CPU-bound integrator; avoid thread oversubscription
     readied = False
@@ -333,8 +340,15 @@ def run_baseline(ctx, spec, pdb_path, args) -> float:
     out_q = ctx.Queue()
     p = ctx.Process(
         target=baseline_main,
-        args=(spec, pdb_path, args.n_systems, args.n_steps, args.warmup_steps,
-              args.temperature_k, out_q),
+        args=(
+            spec,
+            pdb_path,
+            args.n_systems,
+            args.n_steps,
+            args.warmup_steps,
+            args.temperature_k,
+            out_q,
+        ),
     )
     p.start()
     elapsed = out_q.get()
@@ -369,8 +383,19 @@ def run_force_server(
     workers = [
         ctx.Process(
             target=worker_main,
-            args=(i, req_q, res_qs[i], pdb_path, n_systems, args.n_steps,
-                  args.warmup_steps, args.temperature_k, ready_q, done_q, start_evt),
+            args=(
+                i,
+                req_q,
+                res_qs[i],
+                pdb_path,
+                n_systems,
+                args.n_steps,
+                args.warmup_steps,
+                args.temperature_k,
+                ready_q,
+                done_q,
+                start_evt,
+            ),
         )
         for i in range(k)
     ]
@@ -413,12 +438,14 @@ def main() -> None:
     parser.add_argument("--n-gaussians", type=int, default=None)
     parser.add_argument("--cutoff", type=float, default=10.0)
     parser.add_argument(
-        "--sweep", default=None,
+        "--sweep",
+        default=None,
         help="Comma-separated n-systems values; run the server headroom probe for "
         "each and print a summary table (skips the single-process baseline).",
     )
     parser.add_argument(
-        "--workers-sweep", default=None,
+        "--workers-sweep",
+        default=None,
         help="Comma-separated worker counts K; with --sweep, runs the full "
         "(K x n-systems) grid. Defaults to just --workers.",
     )
@@ -434,8 +461,9 @@ def main() -> None:
     for knob, value in _MODEL_DEFAULTS[args.model].items():
         if getattr(args, knob, None) is None:
             setattr(args, knob, value)
-    spec = ModelSpec(args.model, args.hidden, args.n_layers, args.n_gaussians,
-                     args.cutoff)
+    spec = ModelSpec(
+        args.model, args.hidden, args.n_layers, args.n_gaussians, args.cutoff
+    )
 
     # One shared template structure for every process.
     pdb_path, tmpdir = _template_pdb(args)
@@ -448,7 +476,8 @@ def main() -> None:
         sizes = [int(x) for x in args.sweep.split(",")]
         workers_list = (
             [int(x) for x in args.workers_sweep.split(",")]
-            if args.workers_sweep else [args.workers]
+            if args.workers_sweep
+            else [args.workers]
         )
         run_sweep(ctx, spec, str(pdb_path), z, args, sizes, workers_list)
         tmpdir.cleanup()
@@ -457,8 +486,10 @@ def main() -> None:
     print(f"Phase A: baseline (single process), {args.n_systems} systems ...")
     base_elapsed = run_baseline(ctx, spec, str(pdb_path), args)
 
-    print(f"Phase B: force server, K={args.workers} workers x "
-          f"{args.n_systems} systems ...")
+    print(
+        f"Phase B: force server, K={args.workers} workers x "
+        f"{args.n_systems} systems ..."
+    )
     fs_wall, results, profile = run_force_server(
         ctx, spec, str(pdb_path), z, args, args.n_systems, args.workers
     )
@@ -495,21 +526,34 @@ def summarize(profile) -> dict | None:
 def _print_headroom(s: dict) -> None:
     acc, total, n_fwd = s["acc"], s["total"], s["n_fwd"]
     labels = {
-        "get": "get+unpickle", "rebuild": "rebuild views", "curate_h2d": "curate+H2D",
-        "forward": "model_forward (GPU)", "d2h_post": "D2H+post", "put": "pickle+put",
+        "get": "get+unpickle",
+        "rebuild": "rebuild views",
+        "curate_h2d": "curate+H2D",
+        "forward": "model_forward (GPU)",
+        "d2h_post": "D2H+post",
+        "put": "pickle+put",
     }
-    print(f"  SERVER per-request breakdown ({n_fwd} forwards, "
-          f"{s['ms_req']:.2f} ms/req):")
+    print(
+        f"  SERVER per-request breakdown ({n_fwd} forwards, {s['ms_req']:.2f} ms/req):"
+    )
     for stg in _STAGES:
-        print(f"    {labels[stg]:<22} {acc[stg] / total * 100:5.1f}%  "
-              f"{acc[stg] / n_fwd * 1e3:7.3f} ms")
-    print(f"  Tier-1 headroom (overlap all non-forward w/ compute): "
-          f"~{s['ceiling']:.2f}x   (forward = {s['fwd'] * 100:.0f}% of cycle)")
-    lever = ("pickle dominates -> shared-memory transport"
-             if s["ipc"] >= s["rest"]
-             else "transfer/prep dominates -> pinned + CUDA streams (Tier 1)")
-    print(f"    non-forward: ipc {s['ipc'] * 100:.0f}% (get+put)  vs  "
-          f"rest {s['rest'] * 100:.0f}% (rebuild+H2D+D2H)  ->  {lever}")
+        print(
+            f"    {labels[stg]:<22} {acc[stg] / total * 100:5.1f}%  "
+            f"{acc[stg] / n_fwd * 1e3:7.3f} ms"
+        )
+    print(
+        f"  Tier-1 headroom (overlap all non-forward w/ compute): "
+        f"~{s['ceiling']:.2f}x   (forward = {s['fwd'] * 100:.0f}% of cycle)"
+    )
+    lever = (
+        "pickle dominates -> shared-memory transport"
+        if s["ipc"] >= s["rest"]
+        else "transfer/prep dominates -> pinned + CUDA streams (Tier 1)"
+    )
+    print(
+        f"    non-forward: ipc {s['ipc'] * 100:.0f}% (get+put)  vs  "
+        f"rest {s['rest'] * 100:.0f}% (rebuild+H2D+D2H)  ->  {lever}"
+    )
 
 
 def report(args, base_elapsed, fs_wall, results, profile) -> None:
@@ -517,8 +561,10 @@ def report(args, base_elapsed, fs_wall, results, profile) -> None:
     print("=" * 70)
     print("Force-server proof-of-concept")
     print("=" * 70)
-    print(f"  model        {args.model}   systems/worker {args.n_systems}   "
-          f"atoms {args.n_atoms}   steps {args.n_steps}")
+    print(
+        f"  model        {args.model}   systems/worker {args.n_systems}   "
+        f"atoms {args.n_atoms}   steps {args.n_steps}"
+    )
     print(f"  workers (K)  {k}")
     print("-" * 70)
     if fs_wall < 0:
@@ -528,12 +574,17 @@ def report(args, base_elapsed, fs_wall, results, profile) -> None:
         base_tput = base_steps / base_elapsed
         fs_tput = k * base_steps / fs_wall
         speedup = fs_tput / base_tput
-        print(f"  baseline (1 proc):  {base_elapsed:7.2f} s   "
-              f"{base_tput:10.0f} system-steps/s")
-        print(f"  force server (K={k}): {fs_wall:7.2f} s   "
-              f"{fs_tput:10.0f} system-steps/s")
-        print(f"  SPEEDUP            {speedup:5.2f}x   "
-              f"(parallel efficiency {speedup / k * 100:4.0f}% of K)")
+        print(
+            f"  baseline (1 proc):  {base_elapsed:7.2f} s   "
+            f"{base_tput:10.0f} system-steps/s"
+        )
+        print(
+            f"  force server (K={k}): {fs_wall:7.2f} s   {fs_tput:10.0f} system-steps/s"
+        )
+        print(
+            f"  SPEEDUP            {speedup:5.2f}x   "
+            f"(parallel efficiency {speedup / k * 100:4.0f}% of K)"
+        )
         per = "  ".join(f"w{r[0]}:{r[2] - r[1]:.1f}s" for r in sorted(results))
         print(f"  per-worker wall    {per}")
     s = summarize(profile)
@@ -546,11 +597,15 @@ def report(args, base_elapsed, fs_wall, results, profile) -> None:
 def run_sweep(ctx, spec, pdb_path, z, args, sizes, workers_list) -> None:
     """Run the server headroom probe over a (workers x n-systems) grid."""
     print("=" * 84)
-    print(f"Server headroom sweep | model {args.model} | atoms {args.n_atoms} | "
-          f"K={workers_list} | steps {args.n_steps}")
+    print(
+        f"Server headroom sweep | model {args.model} | atoms {args.n_atoms} | "
+        f"K={workers_list} | steps {args.n_steps}"
+    )
     print("=" * 84)
-    hdr = (f"{'K':>3} {'n_sys':>6} {'ms/req':>8} {'fwd%':>6} {'ceiling':>9} "
-           f"{'ipc%':>6} {'rest%':>6} {'Msteps/s':>9}")
+    hdr = (
+        f"{'K':>3} {'n_sys':>6} {'ms/req':>8} {'fwd%':>6} {'ceiling':>9} "
+        f"{'ipc%':>6} {'rest%':>6} {'Msteps/s':>9}"
+    )
     print(hdr)
     print("-" * len(hdr))
     for k in workers_list:
@@ -563,13 +618,17 @@ def run_sweep(ctx, spec, pdb_path, z, args, sizes, workers_list) -> None:
                 print(f"{k:>3} {ns:>6}  aborted (likely OOM); next K.")
                 break
             tput = k * ns * args.n_steps / wall / 1e6
-            print(f"{k:>3} {ns:>6} {s['ms_req']:>8.2f} {s['fwd'] * 100:>5.1f} "
-                  f"{s['ceiling']:>8.2f}x {s['ipc'] * 100:>5.0f} "
-                  f"{s['rest'] * 100:>5.0f} {tput:>9.3f}")
+            print(
+                f"{k:>3} {ns:>6} {s['ms_req']:>8.2f} {s['fwd'] * 100:>5.1f} "
+                f"{s['ceiling']:>8.2f}x {s['ipc'] * 100:>5.0f} "
+                f"{s['rest'] * 100:>5.0f} {tput:>9.3f}"
+            )
         print("-" * len(hdr))
     print("ceiling = 1/fwd% = max Tier-1 speedup if ALL non-forward overlaps compute.")
-    print("ipc = get+put (pickle -> shared memory).  rest = rebuild+H2D+D2H "
-          "(-> CUDA streams / pipeline).")
+    print(
+        "ipc = get+put (pickle -> shared memory).  rest = rebuild+H2D+D2H "
+        "(-> CUDA streams / pipeline)."
+    )
     print("Server memory ~ one n_systems batch, independent of K -> same OOM ceiling.")
     print("Msteps/s is the *instrumented* throughput (per-stage syncs add overhead).")
     print("NOTE: 'get' includes any wait for the next request; saturated (K>=2) it")
