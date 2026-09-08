@@ -50,7 +50,7 @@ Implementing a custom ModelManager for a graph neural network model:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, Any, List
 
 import numpy as np
 import torch
@@ -162,7 +162,7 @@ class ModelManager(ABC):
         return self.post_process_hook(forces, energy)
 
     @abstractmethod
-    def curate_batch(self, atoms_list: List["BatchedAtoms"]) -> dict[str, Tensor]:
+    def curate_batch(self, atoms_list: List["BatchedAtoms"]) -> Any:
         """Convert atoms list to batched model input tensors.
 
         Args:
