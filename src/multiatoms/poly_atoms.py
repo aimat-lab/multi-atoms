@@ -243,8 +243,7 @@ class PolyAtoms:
         procs = [
             ctx.Process(
                 target=_worker_main,
-                args=(i, templates[i], n_systems[i], fn, seeds[i], req_q,
-                      res_qs[i]),
+                args=(i, templates[i], n_systems[i], fn, seeds[i], req_q, res_qs[i]),
             )
             for i in range(k)
         ]

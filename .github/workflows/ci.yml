@@ -5,10 +5,18 @@ on:
     branches: [main]
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
 jobs:
   test:
     # pixi.toml targets linux-64 only, so CI runs on Linux.
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -18,8 +26,11 @@ jobs:
           environments: default
           cache: true
 
-      - name: Run tests
-        run: pixi run -e default test
-
       - name: Lint
         run: pixi run -e default lint
+
+      - name: Format
+        run: pixi run -e default format-check
+
+      - name: Run tests
+        run: pixi run -e default test

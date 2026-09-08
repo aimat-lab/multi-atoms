@@ -168,9 +168,9 @@ class SyntheticManager(ModelManager):
         n_atoms = len(atoms_list[0])
         positions = np.stack([a.positions for a in atoms_list]).reshape(-1, 3)
         pos = torch.tensor(positions, dtype=torch.float32, device=self.device)
-        batch_idx = torch.arange(
-            len(atoms_list), device=self.device
-        ).repeat_interleave(n_atoms)
+        batch_idx = torch.arange(len(atoms_list), device=self.device).repeat_interleave(
+            n_atoms
+        )
         return {"pos": pos, "batch_idx": batch_idx}
 
 
@@ -234,9 +234,9 @@ class SchNetManager(ModelManager):
             atoms_list[0].get_atomic_numbers(), dtype=torch.long, device=self.device
         )
         z = z_one.repeat(n_systems)
-        batch_idx = torch.arange(
-            n_systems, device=self.device
-        ).repeat_interleave(n_atoms)
+        batch_idx = torch.arange(n_systems, device=self.device).repeat_interleave(
+            n_atoms
+        )
         return {"z": z, "pos": pos, "batch": batch_idx}
 
 
@@ -339,16 +339,31 @@ def main() -> None:
     # Model knobs (ignored when --manager-factory is given). Defaults are
     # model-specific and filled in below: schnet uses a typical config
     # (hidden=32, n_layers=3, n_gaussians=32); synthetic uses a larger MLP.
-    parser.add_argument("--hidden", type=int, default=None,
-                        help="hidden width (schnet:32, synthetic:512)")
-    parser.add_argument("--n-layers", type=int, default=None,
-                        help="schnet num_interactions / synthetic MLP depth "
-                             "(schnet:3, synthetic:4)")
+    parser.add_argument(
+        "--hidden",
+        type=int,
+        default=None,
+        help="hidden width (schnet:32, synthetic:512)",
+    )
+    parser.add_argument(
+        "--n-layers",
+        type=int,
+        default=None,
+        help="schnet num_interactions / synthetic MLP depth (schnet:3, synthetic:4)",
+    )
     # schnet-only knobs (--hidden/--n-layers map to hidden_channels/num_interactions)
-    parser.add_argument("--n-gaussians", type=int, default=None,
-                        help="schnet num_gaussians (default 32)")
-    parser.add_argument("--cutoff", type=float, default=10.0,
-                        help="schnet radius graph cutoff in Angstrom")
+    parser.add_argument(
+        "--n-gaussians",
+        type=int,
+        default=None,
+        help="schnet num_gaussians (default 32)",
+    )
+    parser.add_argument(
+        "--cutoff",
+        type=float,
+        default=10.0,
+        help="schnet radius graph cutoff in Angstrom",
+    )
     # real-model hook
     parser.add_argument("--manager-factory", default=None, help="module.path:function")
     parser.add_argument("--pdb", default=None, help="structure for the real model")

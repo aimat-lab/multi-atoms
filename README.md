@@ -2,6 +2,12 @@
   <img src="docs/logo.png" alt="multiatoms" width="420">
 </p>
 
+<p align="center">
+  <a href="https://github.com/aimat-lab/multi-atoms/actions/workflows/ci.yml">
+    <img src="https://github.com/aimat-lab/multi-atoms/actions/workflows/ci.yml/badge.svg" alt="CI">
+  </a>
+</p>
+
 Parallel, GPU-batched molecular dynamics on top of [ASE](https://wiki.fysik.dtu.dk/ase/) `Atoms`.
 
 `multiatoms` lets you run many MD simulations of the same system at once and
