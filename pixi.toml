@@ -9,6 +9,7 @@ version = "0.1.0"
 test = "pytest"
 lint = "ruff check ."
 format = "ruff format ."
+format-check = "ruff format --check ."
 bench = "python benchmarks/measure_duty_cycle.py"
 
 [pypi-dependencies]
