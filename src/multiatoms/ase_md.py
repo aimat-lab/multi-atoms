@@ -4,12 +4,12 @@ Running many ASE integrators at once (the multiatoms use case) trips a
 file-descriptor leak: ASE's ``MolecularDynamics`` opens ``/dev/null`` whenever
 no logfile is given, so N parallel integrators hold N descriptors open and can
 exhaust the process limit. ``NullLogger`` is a no-op stand-in to pass as
-``logfile`` instead, and ``SmartLangevin`` wires it in automatically.
+``logfile`` instead, and ``FdSafeLangevin`` wires it in automatically.
 
 This module is intentionally *not* imported by the package core — it is an
 opt-in convenience for ASE-driven workflows. Import it explicitly:
 
-    from multiatoms.ase_md import NullLogger, SmartLangevin
+    from multiatoms.ase_md import FdSafeLangevin, NullLogger
 """
 
 from pathlib import Path
@@ -47,7 +47,7 @@ class NullLogger(metaclass=Singleton):
         pass
 
 
-class SmartLangevin(Langevin):
+class FdSafeLangevin(Langevin):
     """Langevin integrator that never opens a real file for logging."""
 
     def openfile(

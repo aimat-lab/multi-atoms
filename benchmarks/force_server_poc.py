@@ -53,7 +53,7 @@ from ase.io import read as ase_read
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
 
 from multiatoms import ModelManager, MultiAtoms
-from multiatoms.ase_md import NullLogger, SmartLangevin
+from multiatoms.ase_md import FdSafeLangevin, NullLogger
 
 # Make the sibling bench module importable both when run directly and when
 # re-imported by 'spawn'ed child processes (sys.path[0] is this directory).
@@ -194,7 +194,7 @@ def setup_simulation(manager: ModelManager, pdb_path: str, n_systems: int, temp:
         lambda a: MaxwellBoltzmannDistribution(a, temperature_K=temp), multi.atoms
     )
     integrators = multi.map(
-        lambda a: SmartLangevin(
+        lambda a: FdSafeLangevin(
             a,
             timestep=1 * units.fs,
             temperature_K=temp,

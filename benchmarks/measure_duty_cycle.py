@@ -66,7 +66,7 @@ from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
 from torch import Tensor, nn
 
 from multiatoms import ModelManager, MultiAtoms
-from multiatoms.ase_md import NullLogger, SmartLangevin
+from multiatoms.ase_md import FdSafeLangevin, NullLogger
 from multiatoms.model_manager import ModelManager as _MM
 
 try:
@@ -391,7 +391,7 @@ def main() -> None:
         multi.atoms,
     )
     integrators = multi.map(
-        lambda a: SmartLangevin(
+        lambda a: FdSafeLangevin(
             a,
             timestep=1 * fs,
             temperature_K=args.temperature_k,

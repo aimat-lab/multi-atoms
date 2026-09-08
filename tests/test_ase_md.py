@@ -6,13 +6,13 @@ from ase.build import bulk
 from ase.calculators.emt import EMT
 from ase.md.langevin import Langevin
 
-from multiatoms.ase_md import NullLogger, SmartLangevin
+from multiatoms.ase_md import FdSafeLangevin, NullLogger
 
 
 def _make_dyn():
     atoms = bulk("Cu", "fcc", a=3.6, cubic=True)
     atoms.calc = EMT()
-    return SmartLangevin(
+    return FdSafeLangevin(
         atoms,
         timestep=1 * units.fs,
         temperature_K=300,
@@ -33,16 +33,16 @@ def test_null_logger_methods_are_noops():
     logger.close()
 
 
-def test_smart_langevin_is_langevin_subclass():
-    assert issubclass(SmartLangevin, Langevin)
+def test_fd_safe_langevin_is_langevin_subclass():
+    assert issubclass(FdSafeLangevin, Langevin)
 
 
-def test_smart_langevin_openfile_none_returns_null_logger():
+def test_fd_safe_langevin_openfile_none_returns_null_logger():
     dyn = _make_dyn()
     assert isinstance(dyn.openfile(None), NullLogger)
 
 
-def test_smart_langevin_runs():
+def test_fd_safe_langevin_runs():
     dyn = _make_dyn()
     dyn.run(3)
     assert np.all(np.isfinite(dyn.atoms.get_positions()))

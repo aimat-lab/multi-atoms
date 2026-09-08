@@ -94,7 +94,7 @@ from ase import units
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
 
 from multiatoms import MultiAtoms, ModelManager
-from multiatoms.ase_md import NullLogger, SmartLangevin
+from multiatoms.ase_md import FdSafeLangevin, NullLogger
 
 
 class MyModelManager(ModelManager):
@@ -121,8 +121,8 @@ multi = MultiAtoms(template="system.pdb", model_manager=manager, n_systems=64)
 # Per-system setup runs serially (no GPU calls here):
 multi.foreach(lambda a: MaxwellBoltzmannDistribution(a, temperature_K=300), multi.atoms)
 integrators = multi.map(
-    lambda a: SmartLangevin(a, timestep=1 * units.fs, temperature_K=300,
-                            friction=0.01 / units.fs, logfile=NullLogger()),
+    lambda a: FdSafeLangevin(a, timestep=1 * units.fs, temperature_K=300,
+                             friction=0.01 / units.fs, logfile=NullLogger()),
     multi.atoms,
 )
 
@@ -215,7 +215,7 @@ GPU forward, which is the regime the figure above was measured in.
 from multiatoms import PolyAtoms
 
 def simulate(multi, worker_id):          # top-level so `spawn` can pickle it
-    integrators = multi.map(lambda a: SmartLangevin(a, ...), multi.atoms)
+    integrators = multi.map(lambda a: FdSafeLangevin(a, ...), multi.atoms)
     with multi.parallel():
         multi.foreach(lambda i: i.run(1000), integrators)
     return multi.get_positions()
@@ -244,7 +244,7 @@ the process limit. The optional `multiatoms.ase_md` module fixes this:
 
 - `NullLogger` — a no-op stream; pass it as `logfile=` to any ASE
   integrator/optimizer (`Langevin`, `VelocityVerlet`, `BFGS`, ...).
-- `SmartLangevin` — a `Langevin` subclass that returns a `NullLogger` instead of
+- `FdSafeLangevin` — a `Langevin` subclass that returns a `NullLogger` instead of
   opening `/dev/null`, so the fix applies even when ASE forces `logfile=None`
   internally.
 
