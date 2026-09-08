@@ -110,18 +110,6 @@ class MyModelManager(ModelManager):
         batch_idx = torch.arange(n_systems, device=self.device).repeat_interleave(n_atoms)
         return {"pos": pos, "batch_idx": batch_idx}
 
-    def model_forward(self, batched_input):
-        pos = batched_input["pos"]
-        pos.requires_grad_(True)
-        with torch.set_grad_enabled(True):
-            energy = self.model(pos, batched_input["batch_idx"])
-            forces = self.model.get_forces(energy, pos)
-        return energy, forces
-
-    # Optional: convert/scale units before results are distributed.
-    def post_process_hook(self, forces, energy):
-        return forces, energy
-
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 manager = MyModelManager(model=my_model.to(device).eval(), device=device)
