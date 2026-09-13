@@ -13,16 +13,19 @@
 
 Parallel, GPU-batched molecular dynamics (MD) on top of [ASE](https://wiki.fysik.dtu.dk/ase/).
 
-ML potentials are fast per atom, but small systems underfill the GPU. Stepping
-`N` copies in lockstep and batching their force evaluations turns `N` tiny
-forward passes into one big one, which is where the throughput comes from.
+Simulating an ML potential with ASE is very easy. You plug it in as the
+calculator and are ready to go. But it is extremely slow since your GPU sits
+idle for smaller systems. MultiAtoms bridges this gap: it gives access to the
+tools of the ASE library while also being fast.
 
-The figure below shows where that lands. Throughput is measured on one A100 with
-a SchNet model, alanine dipeptide, no solvent. Raw ASE manages 8.3 ns/day.
-`MultiAtoms` takes that to 267 ns/day (32×), and `PolyAtoms` reaches ~423 ns/day
-(51×). That is within ~12% of [mlcg](https://github.com/ClementiGroup/mlcg), a
-fully GPU-native code, while every simulation stays a standard ASE object driven
-by a standard ASE integrator.
+The figure below shows the speedup achieved by MultiAtoms. Throughput is
+measured on one A100 with a SchNet model, alanine dipeptide, no solvent. Raw ASE
+manages 8.3 ns/day. `MultiAtoms` takes that to 267 ns/day (32×), and `PolyAtoms`
+reaches ~423 ns/day (51×). The comparison is made to
+[mlcg](https://github.com/ClementiGroup/mlcg), which reimplements integrators
+such as Langevin in torch to be GPU-native. `PolyAtoms` stays within ~12% of it
+while every simulation stays a standard ASE object driven by a standard ASE
+integrator.
 
 ![MD throughput scaling on an A100](docs/throughput_scaling.png)
 
@@ -31,15 +34,17 @@ by a standard ASE integrator.
 > under-occupied: while capacity is spare, each added replica buys close to its
 > full throughput. The curve flattens where the GPU saturates.
 
-`MultiAtoms` runs many MD simulations at once and batches their model
+## How does that work?
+
+ML potentials are fast per atom, but small systems underfill the GPU. This is
+why `MultiAtoms` runs many MD simulations at once and batches their model
 evaluations into a single forward pass. The simulations themselves are ordinary
 ASE `Atoms` objects driven by an ordinary ASE integrator (Langevin, Velocity
 Verlet, BFGS). A cooperative greenlet scheduler pauses each one when it needs
-forces; once they have all yielded, it collects the pending systems, runs one
+forces. Once they have all yielded, it collects the pending systems, runs one
 batched forward pass, and hands the results back. Nothing in that loop needs to
 be GPU-native. The interception happens at `get_forces()`, so any ASE driver
-that calls it is batched unchanged. A fully GPU-native engine reaches
-comparable throughput only by rewriting the dynamics itself.
+that calls it is batched unchanged.
 
 `PolyAtoms` extends this across processes. It runs several `MultiAtoms`
 instances at once, so while one is blocked on its batched forward, the others
@@ -50,7 +55,6 @@ keep integrating on the CPU, which keeps the GPU busy.
 > saturate the GPU on their own, or if much of the per-step cost sits outside
 > the model forward, such as graph building in `curate_batch`. See
 > [docs/usage.md](docs/usage.md) for what batching does and does not cover.
-
 
 ## Install
 
